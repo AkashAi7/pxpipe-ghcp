@@ -215,6 +215,46 @@ describe('transform', () => {
     expect(info.env).toBeUndefined();
   });
 
+  it('computes stable systemSha8 across turns when the static slab is identical', async () => {
+    const staticSlab = 'claude.md\n'.repeat(400);
+    const t1 =
+      staticSlab + "<env>\nWorking directory: /a\nToday's date: 2026-05-18\n</env>";
+    const t2 =
+      staticSlab + "<env>\nWorking directory: /a\nToday's date: 2026-05-19\n</env>";
+    const mk = (sys: string) =>
+      new TextEncoder().encode(
+        JSON.stringify({
+          model: 'claude',
+          messages: [{ role: 'user', content: 'hi' }],
+          system: sys,
+        }),
+      );
+    const a = await transformRequest(mk(t1));
+    const b = await transformRequest(mk(t2));
+    expect(a.info.systemSha8).toBeDefined();
+    expect(b.info.systemSha8).toBeDefined();
+    // Static slab is identical, dynamic block changed → systemSha8 must NOT
+    // change (the whole point is that the cached payload is stable).
+    expect(a.info.systemSha8).toBe(b.info.systemSha8);
+  });
+
+  it('computes firstUserSha8 from the first user message', async () => {
+    const body = new TextEncoder().encode(
+      JSON.stringify({
+        model: 'claude',
+        messages: [
+          { role: 'user', content: 'continue from HANDOFF?' },
+          { role: 'assistant', content: 'sure' },
+          { role: 'user', content: 'a totally different message' },
+        ],
+        system: 'claude.md\n'.repeat(400),
+      }),
+    );
+    const { info } = await transformRequest(body);
+    expect(info.firstUserSha8).toBeDefined();
+    expect(info.firstUserSha8).toMatch(/^[0-9a-f]{8}$/);
+  });
+
   it('passes through when the system prompt is only dynamic blocks', async () => {
     const sys = '<env>\nWorking directory: /tmp\n</env>';
     const body = new TextEncoder().encode(

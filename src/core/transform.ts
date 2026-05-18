@@ -69,6 +69,15 @@ export interface TransformInfo {
   /** Parsed env block, if Claude Code injected one. Useful for telemetry
    *  (per-project compression ratios, etc.). */
   env?: EnvFields;
+  /** sha256[0..8] of the static slab + tool docs (what ends up in the image).
+   *  Repeats across turns → cache_control SHOULD be hitting upstream. */
+  systemSha8?: string;
+  /** sha256[0..8] of just the CLAUDE.md section if detectable. Lets us
+   *  bucket requests by project even when cwd is absent. */
+  claudeMdSha8?: string;
+  /** sha256[0..8] of the first user message text (first 4 KiB). Rough
+   *  thread/session id since the wire protocol carries none. */
+  firstUserSha8?: string;
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -134,6 +143,72 @@ function splitStaticDynamic(text: string): {
     dynamicText: dynamicParts.join('\n\n'),
     blockCount: dynamicParts.length,
   };
+}
+
+/**
+ * Compute sha256 and return the first 8 hex chars. Web Crypto so it works
+ * the same in Node 18+ and Workers. 8 chars = 32 bits = collision-safe for
+ * the request volume we'd see in a single proxy instance.
+ */
+export async function sha8(text: string): Promise<string> {
+  const buf = new TextEncoder().encode(text);
+  const digest = await crypto.subtle.digest('SHA-256', buf);
+  const bytes = new Uint8Array(digest);
+  let hex = '';
+  for (let i = 0; i < 4; i++) hex += bytes[i]!.toString(16).padStart(2, '0');
+  return hex;
+}
+
+/**
+ * Best-effort: pull out the CLAUDE.md slab from a system text. Heuristic —
+ * Claude Code typically wraps it with a heading like "Claude Code Rules"
+ * or includes it under a `# CLAUDE.md` / system-reminder block. Returns
+ * empty string if nothing CLAUDE.md-shaped is detected; callers should
+ * skip hashing in that case.
+ */
+export function extractClaudeMdSlab(staticText: string): string {
+  if (!staticText) return '';
+  // Common markers Claude Code uses around the CLAUDE.md content.
+  const startPatterns = [
+    /^\s*#+\s*Claude\s+Code\s+Rules\s*$/im,
+    /^\s*#+\s*CLAUDE\.md\s*$/im,
+    /^\s*Claude\s+Code\s+Rules:?\s*$/im,
+  ];
+  let startIdx = -1;
+  for (const p of startPatterns) {
+    const m = p.exec(staticText);
+    if (m && (startIdx === -1 || m.index < startIdx)) startIdx = m.index;
+  }
+  if (startIdx === -1) return '';
+  // Run until the next top-level heading (# foo) or end of text.
+  const tail = staticText.slice(startIdx);
+  const endMatch = /\n#\s+\S/.exec(tail.slice(1));
+  const end = endMatch ? endMatch.index + 1 : tail.length;
+  return tail.slice(0, end).trim();
+}
+
+/**
+ * Hash the first user message text, capped at 4 KiB so very long initial
+ * pastes don't dominate hashing time and so we still get a stable id for
+ * the conversation thread (initial prompt usually fits well within 4 KiB).
+ */
+export function firstUserText(req: MessagesRequest): string {
+  const msgs = req.messages ?? [];
+  for (const m of msgs) {
+    if (m.role !== 'user') continue;
+    if (typeof m.content === 'string') return m.content.slice(0, 4096);
+    if (Array.isArray(m.content)) {
+      for (const block of m.content) {
+        if (block && (block as any).type === 'text' && typeof (block as any).text === 'string') {
+          return ((block as any).text as string).slice(0, 4096);
+        }
+      }
+    }
+    // First user message found but unreadable → return empty so we don't
+    // accidentally hash some downstream user message.
+    return '';
+  }
+  return '';
 }
 
 /**
@@ -252,6 +327,18 @@ export async function transformRequest(
   const env = extractEnvFields(dynamicText);
   if (Object.keys(env).length > 0) info.env = env;
 
+  // Privacy-safe fingerprints that don't depend on tool docs (computed
+  // here so they're available even if we below_min_chars out below).
+  // systemSha8 is set later, after we know the combined image-bound text.
+  const claudeMdSlab = extractClaudeMdSlab(staticText);
+  const firstUser = firstUserText(req);
+  const [claudeMdSha, firstUserSha] = await Promise.all([
+    claudeMdSlab ? sha8(claudeMdSlab) : Promise.resolve(undefined),
+    firstUser ? sha8(firstUser) : Promise.resolve(undefined),
+  ]);
+  if (claudeMdSha) info.claudeMdSha8 = claudeMdSha;
+  if (firstUserSha) info.firstUserSha8 = firstUserSha;
+
   // 2. Optionally fold tool docs into the same image, stubbing originals.
   let toolDocsText = '';
   let toolsRewritten: ToolDef[] | undefined;
@@ -274,6 +361,9 @@ export async function transformRequest(
   // cache key (= image bytes) stays stable across turns.
   const combined = [staticText, toolDocsText].filter((s) => s.length > 0).join('\n\n');
   info.origChars = combined.length;
+  // Hash the EXACT text that goes into the image. Repeats of this hash across
+  // turns = cache_control should be earning its keep.
+  if (combined) info.systemSha8 = await sha8(combined);
 
   if (combined.length < o.minCompressChars) {
     info.reason = `below_min_chars (${combined.length} < ${o.minCompressChars})`;
