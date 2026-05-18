@@ -1,13 +1,17 @@
+# Node / TS
 node_modules/
-.zig-cache/
-zig-out/
+dist/
+build/
 *.log
+
+# Cloudflare Workers
+.wrangler/
+.dev.vars
+
+# OS
 .DS_Store
+
+# Python (legacy/)
 __pycache__/
 *.pyc
 *.pyo
-dist/
-build/
-
-# Rust build artifacts
-target/
