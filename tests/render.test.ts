@@ -7,7 +7,14 @@ import {
 } from '../src/core/render.js';
 import { encodeGrayPng, bytesToBase64 } from '../src/core/png.js';
 import { transformRequest } from '../src/core/transform.js';
-import { atlasRank, ATLAS_CELL_H } from '../src/core/atlas.js';
+import {
+  atlasRank,
+  ATLAS_CELL_H,
+  ATLAS_CELL_W,
+  ATLAS_PIXELS,
+  ATLAS_WIDE_FLAGS,
+  ATLAS_NUM_GLYPHS,
+} from '../src/core/atlas.js';
 
 describe('png encoder', () => {
   it('produces a valid PNG signature', async () => {
@@ -167,6 +174,23 @@ describe('renderer', () => {
     expect(atlasRank('①'.codePointAt(0)!)).toBeGreaterThanOrEqual(0);
     expect(atlasRank('②'.codePointAt(0)!)).toBeGreaterThanOrEqual(0);
     expect(atlasRank('⑩'.codePointAt(0)!)).toBeGreaterThanOrEqual(0);
+  });
+
+  it('atlas pixel storage is bit-packed (1 bit per pixel)', () => {
+    // Sanity check on the storage format. Total pixels across all glyphs =
+    // numGlyphs × cellH × (cellW or 2*cellW) depending on each glyph's
+    // wide-flag. The packed byte buffer must be ceil(totalBits / 8) bytes
+    // — within 1 byte of the theoretical minimum.
+    let totalBits = 0;
+    for (let r = 0; r < ATLAS_NUM_GLYPHS; r++) {
+      const srcW = ATLAS_WIDE_FLAGS[r] === 1 ? 2 * ATLAS_CELL_W : ATLAS_CELL_W;
+      totalBits += srcW * ATLAS_CELL_H;
+    }
+    const expectedBytes = Math.ceil(totalBits / 8);
+    expect(ATLAS_PIXELS.byteLength).toBe(expectedBytes);
+    // Hard guarantee: the 8-bit format would have used totalBits bytes, so
+    // bit-packed is exactly 8× smaller (modulo the rounding to whole bytes).
+    expect(ATLAS_PIXELS.byteLength).toBeLessThanOrEqual(totalBits / 8 + 1);
   });
 
   it('atlas covers Hangul Syllables (한 글 안 녕) — full-bmp profile only', () => {

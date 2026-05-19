@@ -186,15 +186,23 @@ function blitGlyph(
   if (rank < 0) return 0;
   const wide = ATLAS_WIDE_FLAGS[rank] === 1;
   const srcW = wide ? 2 * ATLAS_CELL_W : ATLAS_CELL_W;
+  // ATLAS_OFFSETS is a BIT offset since the bit-pack slice. To read pixel
+  // (gx, gy) of this glyph: bitIdx = srcOff + gy*srcW + gx, then extract
+  // the MSB-first bit at byte (bitIdx >>> 3), position 7 - (bitIdx & 7).
+  // Output pixel = 0 (background) or 255 (full ink).
   const srcOff = ATLAS_OFFSETS[rank]!;
   for (let gy = 0; gy < ATLAS_CELL_H; gy++) {
     const dstRow = (y + gy) * fbW + x;
-    const srcRow = srcOff + gy * srcW;
+    const bitRowStart = srcOff + gy * srcW;
     for (let gx = 0; gx < srcW; gx++) {
-      const v = ATLAS_PIXELS[srcRow + gx]!;
-      // max() blending preserves antialiased edges if glyphs overlap (they
-      // shouldn't in our grid layout, but the math is correct either way).
-      if (v > fb[dstRow + gx]!) fb[dstRow + gx] = v;
+      const bitIdx = bitRowStart + gx;
+      const byte = ATLAS_PIXELS[bitIdx >>> 3]!;
+      const bit = (byte >>> (7 - (bitIdx & 7))) & 1;
+      if (bit) {
+        // 1-bit pixel: full ink. No max() blending needed since glyphs
+        // never overlap in our grid layout — set unconditionally.
+        fb[dstRow + gx] = 255;
+      }
     }
   }
   return wide ? 2 : 1;

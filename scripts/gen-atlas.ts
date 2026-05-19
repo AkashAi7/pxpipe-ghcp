@@ -209,17 +209,28 @@ const narrowCtx = narrowCanvas.getContext('2d');
 narrowCtx.font = `${FONT_PX}px ${FONT_FAMILY}`;
 narrowCtx.textBaseline = 'alphabetic';
 
+// Pixel data is BIT-PACKED, MSB-first. Unifont glyphs are inherently 1-bit
+// (every pixel is exactly 0 or 255 — no antialiasing), so storing as bytes
+// wastes 7 bits/pixel. The runtime decoder extracts the bit at index
+//   bitIdx = OFFSETS[rank] + row * srcW + col
+// where srcW is `cellW` for narrow glyphs or `2*cellW` for wide (CJK) ones —
+// driven by WIDE_FLAGS[rank]. OFFSETS is now a BIT offset (was byte offset
+// in the prior 8-bit format). Bit indices fit comfortably in Uint32:
+// 35k glyphs × 10×11 px max = ~3.9M bits, well under 2^32.
 const codepoints = new Uint32Array(found.length);
 const offsets = new Uint32Array(found.length);
 const wideFlags = new Uint8Array(found.length);
-const cellSlices: Uint8Array[] = [];
-let totalBytes = 0;
+// Collect per-glyph bit slices first; we'll pack them into a single
+// MSB-first bitstream at the end so glyph N starts exactly where glyph N-1
+// ended (no byte alignment between glyphs).
+const cellBitSlices: Uint8Array[] = []; // one entry per glyph; values are 0 or 1
+let totalBits = 0;
 
 for (let i = 0; i < found.length; i++) {
   const { cp, wide } = found[i]!;
   codepoints[i] = cp;
   wideFlags[i] = wide ? 1 : 0;
-  offsets[i] = totalBytes;
+  offsets[i] = totalBits;
 
   const w = wide ? 2 * cellW : cellW;
   const ctx = wide ? wideCtx : narrowCtx;
@@ -231,20 +242,36 @@ for (let i = 0; i < found.length; i++) {
   ctx.fillText(String.fromCodePoint(cp), 0, ascent);
 
   const img = ctx.getImageData(0, 0, w, cellH);
-  const buf = new Uint8Array(w * cellH);
-  for (let p = 0; p < buf.length; p++) buf[p] = img.data[p * 4]!;
-  cellSlices.push(buf);
-  totalBytes += buf.length;
+  // Threshold the R channel to 1-bit. Unifont is already 0/255 black-and-
+  // white so the threshold is academic, but use ≥128 for safety against
+  // any subpixel-rendering surprises.
+  const bits = new Uint8Array(w * cellH);
+  for (let p = 0; p < bits.length; p++) bits[p] = img.data[p * 4]! >= 128 ? 1 : 0;
+  cellBitSlices.push(bits);
+  totalBits += bits.length;
 }
 
+// Pack into MSB-first bitstream: bit at index B lives in byte B>>3 at
+// position 7-(B&7). Total bytes = ceil(totalBits / 8).
+const totalBytes = (totalBits + 7) >>> 3;
 const pixels = new Uint8Array(totalBytes);
 {
-  let off = 0;
-  for (const s of cellSlices) {
-    pixels.set(s, off);
-    off += s.length;
+  let bitOff = 0;
+  for (const bits of cellBitSlices) {
+    for (let p = 0; p < bits.length; p++) {
+      if (bits[p]!) {
+        const byteIdx = bitOff >>> 3;
+        const bitShift = 7 - (bitOff & 7);
+        pixels[byteIdx]! |= 1 << bitShift;
+      }
+      bitOff++;
+    }
   }
 }
+console.log(
+  `[gen-atlas] bit-packed pixel storage: ${totalBits} bits → ${totalBytes} bytes ` +
+    `(was ${totalBits} bytes at 8-bit; ${(totalBits / totalBytes).toFixed(1)}× pre-deflate shrink)`,
+);
 
 // --- Encode binary blobs as base64 ----------------------------------------
 // JSON array literals of 41k numbers would blow up atlas.ts to several MB
@@ -313,14 +340,22 @@ function decodeU32(b64: string): Uint32Array {
  *  at \`rank\` in OFFSETS / WIDE_FLAGS / PIXELS. */
 export const ATLAS_CODEPOINTS: Uint32Array = /* @__PURE__ */ decodeU32(CODEPOINTS_B64);
 
-/** Byte offset into ATLAS_PIXELS for the glyph at each rank. */
+/** BIT offset into ATLAS_PIXELS for the glyph at each rank. (Was byte offset
+ *  in the prior 8-bit format.) */
 export const ATLAS_OFFSETS: Uint32Array = /* @__PURE__ */ decodeU32(OFFSETS_B64);
 
 /** 1 if the glyph at this rank is double-wide (East Asian Wide), 0 otherwise. */
 export const ATLAS_WIDE_FLAGS: Uint8Array = /* @__PURE__ */ decodeB64(WIDE_FLAGS_B64);
 
-/** Packed grayscale pixel buffer. Glyph at rank \`r\` occupies
- *  \`OFFSETS[r] .. OFFSETS[r] + (WIDE_FLAGS[r] ? 2 : 1) * CELL_W * CELL_H\`. */
+/** Bit-packed 1-bit pixel data, MSB-first. Unifont glyphs are inherently
+ *  1-bit (every pixel is 0 or 255 — no antialiasing), so we store 8 px per
+ *  byte. The runtime decoder (blitGlyph) extracts:
+ *    bitIdx  = OFFSETS[rank] + row * srcW + col
+ *    byteIdx = bitIdx >>> 3
+ *    bitOff  = 7 - (bitIdx & 7)
+ *    pixel   = (ATLAS_PIXELS[byteIdx] >>> bitOff) & 1   // 0 or 1
+ *  where srcW is CELL_W (narrow) or 2*CELL_W (wide, per WIDE_FLAGS[rank]).
+ *  Output framebuffer maps 0 → 0 (background) and 1 → 255 (full ink). */
 export const ATLAS_PIXELS: Uint8Array = /* @__PURE__ */ decodeB64(PIXELS_B64);
 
 /** Number of glyphs in the atlas. */
@@ -345,5 +380,5 @@ export function atlasRank(codepoint: number): number {
 writeFileSync(OUT_PATH, banner + body);
 console.log(
   `[gen-atlas] wrote ${OUT_PATH} ` +
-    `(${pixels.length} pixel bytes, ${pixelsB64.length} b64 chars; total file ~${Math.round((banner.length + body.length) / 1024)} KB)`,
+    `(${pixels.length} pixel bytes packed from ${totalBits} bits, ${pixelsB64.length} b64 chars; total file ~${Math.round((banner.length + body.length) / 1024)} KB)`,
 );
