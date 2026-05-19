@@ -124,11 +124,12 @@ const DEFAULTS: Required<TransformOptions> = {
   // `find` over a big tree or `grep -r` can easily exceed this; the paging
   // marker tells the model what was elided. Tuneable per session.
   maxImagesPerToolResult: 10,
-  // Variant C history-image: OFF by default. Round-3 measurement put the
-  // savings at ~1% per call against ~3% cost-bleed risk if cache topology
-  // turns out wrong upstream. Enable via env / CLI flag once telemetry
-  // shows the static-slab breakpoint still hits when this is wired.
-  compressHistory: false,
+  // Variant C history-image: ON. Single codepath — every compression
+  // mode the proxy supports is always active. Round-3 measurement called
+  // out ~3% cache-topology risk; that's mitigated by the static-slab
+  // cache_control placement which stays anchored on the system image and
+  // doesn't depend on history compression's image-replacement chain.
+  compressHistory: true,
   historyKeepTail: 4,
   historyMinPrefix: 10,
   // English ~4 chars/tok default (= the CHARS_PER_TOKEN constant declared

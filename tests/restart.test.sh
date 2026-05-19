@@ -166,18 +166,23 @@ test_port_in_use() {
   return 0
 }
 
-# ---- Test 7: flag passthrough ------------------------------------------
-test_passthrough() {
+# ---- Test 7: unknown args are rejected ---------------------------------
+# The proxy takes no behavior flags; the restart script accepts only
+# --no-build. Anything else should bail with a clear message and never
+# reach `node bin/cli.js`.
+test_rejects_unknown_args() {
   local sandbox="$1" logf="$2"
-  ( cd "$REPO" && "$SCRIPT" --no-build --port 47899 --no-tools >/dev/null 2>&1 || true )
-  grep -q "node bin/cli.js --port 47899 --no-tools" "$logf" || return 1
+  if ( cd "$REPO" && "$SCRIPT" --no-build --port 47899 >/dev/null 2>&1 ); then
+    return 1
+  fi
+  grep -q "node bin/cli.js" "$logf" && return 1
   return 0
 }
 
-run_test "no proxy running"     test_no_running
-run_test "build failure aborts" test_build_failure
-run_test "port-in-use aborts"   test_port_in_use
-run_test "flag passthrough"     test_passthrough
+run_test "no proxy running"        test_no_running
+run_test "build failure aborts"    test_build_failure
+run_test "port-in-use aborts"      test_port_in_use
+run_test "rejects unknown args"    test_rejects_unknown_args
 
 echo ""
 echo "$PASS passed, $FAIL failed"

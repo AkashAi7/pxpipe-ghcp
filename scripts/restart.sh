@@ -19,45 +19,33 @@
 #
 # Flags:
 #   --no-build    Skip the rebuild step. Use when you know dist/ is fresh.
-#                 Anything else (port, upstream, etc.) is passed through to
-#                 the proxy unchanged.
 #
 # Examples:
 #   pnpm run restart
 #   pnpm run restart -- --no-build
-#   pnpm run restart -- --port 47899 --no-tools
+#   PORT=47899 pnpm run restart
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-# --- Parse our own flags out of "$@". Everything else passes through. ----
+# --- Parse our own flags out of "$@". --no-build only — pixelpipe takes none. ----
 DO_BUILD=1
-PROXY_ARGS=()
 for arg in "$@"; do
   case "$arg" in
     --no-build)
       DO_BUILD=0
       ;;
     *)
-      PROXY_ARGS+=("$arg")
+      echo "[restart] unknown argument: $arg" >&2
+      echo "[restart] this script only accepts --no-build (pixelpipe takes no flags)" >&2
+      exit 2
       ;;
   esac
 done
 
-# --- Figure out which port the new proxy will bind. Default 47821; if the
-# --- user passed --port we honor it. (We don't try to parse PORT= env var
-# --- because that's handled inside bin/cli.js itself.)
-TARGET_PORT=47821
-prev=""
-for arg in "${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"}"; do
-  case "$prev" in
-    -p|--port)
-      TARGET_PORT="$arg"
-      ;;
-  esac
-  prev="$arg"
-done
+# --- Figure out which port the new proxy will bind. PORT env var or 47821.
+TARGET_PORT="${PORT:-47821}"
 
 # --- 1. Discover running proxies ------------------------------------------
 # `[c]li.js` keeps pgrep from matching itself if anyone pipes us through grep.
@@ -124,4 +112,4 @@ fi
 
 # --- 6. Start fresh in the foreground. exec so Ctrl-C goes straight to Node.
 echo "[restart] starting fresh proxy on :$TARGET_PORT (Ctrl-C to stop)"
-exec node bin/cli.js "${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"}"
+exec node bin/cli.js

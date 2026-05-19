@@ -55,10 +55,9 @@ node bin/cli.js         # listens on 127.0.0.1:47821 by default
 After editing code, restart in one step:
 
 ```bash
-pnpm run restart                              # graceful SIGTERM of any running
-                                               # instance → rebuild → fresh start
+pnpm run restart                              # graceful SIGTERM → rebuild → start
 pnpm run restart -- --no-build                # skip rebuild (dist/ is fresh)
-pnpm run restart -- --port 47822 --no-tools   # forward CLI flags to the proxy
+PORT=47822 pnpm run restart                   # override listen port via env
 ```
 
 `pnpm run restart` does, in order:
@@ -72,7 +71,8 @@ pnpm run restart -- --port 47822 --no-tools   # forward CLI flags to the proxy
    know `dist/` is fresh.
 4. Checks the target port is free. If it isn't, names the holding process
    and refuses to start (cheaper than a crashed Node stacktrace).
-5. `exec`s `node bin/cli.js "$@"` in the foreground so Ctrl-C reaches Node.
+5. `exec`s `node bin/cli.js` in the foreground so Ctrl-C reaches Node.
+   The proxy takes no behavioral flags — env vars only (see Configuration).
 
 Point Claude Code at it:
 
@@ -109,19 +109,17 @@ You can attach a custom hostname and route in `wrangler.toml`.
 
 ## Configuration
 
-Both runtimes read the same options — Node from CLI flags or env, Worker
-from `wrangler.toml` `[vars]`.
+The proxy runs with a single codepath. Every compression mode is on,
+every break-even threshold is at its measured-best value, and tuning
+parameters are not user-adjustable. The only configurable surface is
+where to listen, what to proxy, and where to log — env-var only, no
+CLI flags.
 
-| flag / var               | default                       | meaning                                     |
-| ------------------------ | ----------------------------- | ------------------------------------------- |
-| `--port`     `PORT`      | `47821`                       | Node only — listen port                     |
-| `--upstream` `ANTHROPIC_UPSTREAM` | `https://api.anthropic.com` | where to forward                     |
-| `--no-compress` `COMPRESS=0`     | on            | master switch                               |
-| `--no-tools`    `COMPRESS_TOOLS=0` | on          | fold tool docs into the image               |
-| `--no-schemas`  `COMPRESS_SCHEMAS=0` | on        | include `input_schema` JSON in the image    |
-| `--min-chars` `MIN_COMPRESS_CHARS` | `2000`      | skip compression below this many chars      |
-| `--placement` `PLACEMENT` | `system`                     | `system` or `user` — where image lands      |
-| `--cols`     `COLS`      | `100`                         | soft-wrap column count                      |
+| env var              | default                       | meaning                       |
+| -------------------- | ----------------------------- | ----------------------------- |
+| `PORT`               | `47821`                       | Node only — listen port       |
+| `ANTHROPIC_UPSTREAM` | `https://api.anthropic.com`   | upstream API base             |
+| `PIXELPIPE_LOG`      | `~/.pixelpipe/events.jsonl`   | persistent event log          |
 
 In Workers, set the optional upstream API key with:
 

@@ -11,10 +11,8 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { createProxy, type ProxyConfig } from './core/proxy.js';
-import type { TransformOptions } from './core/transform.js';
 import {
   toTrackEvent,
-  noopTracker,
   TRACK_BODY_INLINE_MAX,
   type Tracker,
   type TrackEvent,
@@ -25,146 +23,68 @@ import {
   type DashboardRoute,
 } from './dashboard.js';
 
-interface CliOpts {
+/** Runtime config. Single codepath: every behavior is on, all tuning
+ *  parameters come from DEFAULTS in transform.ts. The only adjustables
+ *  are deployment concerns (where to listen, what to proxy, where to log)
+ *  and they're env-var only — no CLI flags. */
+interface RuntimeConfig {
   port: number;
   upstream: string;
-  compress: boolean;
-  compressTools: boolean;
-  compressSchemas: boolean;
-  compressReminders: boolean;
-  compressToolResults: boolean;
-  /** Variant C history-image compression (opt-in). Marginal savings per
-   *  round-3 spec; only enable once cache topology is verified. */
-  compressHistory: boolean;
-  historyKeepTail: number;
-  historyMinPrefix: number;
-  minCompressChars: number;
-  minReminderChars: number;
-  minToolResultChars: number;
-  cols: number;
-  /** R2 multi-column packing — default 1 (off). 2 squeezes ~2× source rows
-   *  per image; needs OCR verification before being made the default. */
-  multiCol: number;
-  /** When true, append per-request events to eventsFile. Default-on. */
-  track: boolean;
-  /** Where to append JSONL events. Default ~/.pixelpipe/events.jsonl. */
   eventsFile: string;
 }
 
-function envFlag(name: string, fallback: boolean): boolean {
-  const v = process.env[name];
-  if (v == null) return fallback;
-  return v === '1' || v.toLowerCase() === 'true';
-}
-
-function parseCli(argv: string[]): CliOpts {
-  const o: CliOpts = {
+function parseCli(argv: string[]): RuntimeConfig {
+  // Only flags accepted are --help and --version. Anything else is an
+  // error — there is exactly ONE way to run pixelpipe and the dashboard
+  // exposes every metric the operator might want to inspect.
+  for (const a of argv) {
+    if (a === '-h' || a === '--help') {
+      printHelp();
+      process.exit(0);
+    }
+    if (a === '--version') {
+      printVersion();
+      process.exit(0);
+    }
+    if (a.startsWith('-')) {
+      console.error(`[pixelpipe] unknown option: ${a}`);
+      console.error(`[pixelpipe] this build accepts no flags; run \`pixelpipe --help\` for env vars`);
+      process.exit(2);
+    }
+  }
+  return {
     port: Number(process.env.PORT ?? 47821),
     upstream: process.env.ANTHROPIC_UPSTREAM ?? 'https://api.anthropic.com',
-    compress: envFlag('COMPRESS', true),
-    compressTools: envFlag('COMPRESS_TOOLS', true),
-    compressSchemas: envFlag('COMPRESS_SCHEMAS', true),
-    compressReminders: envFlag('COMPRESS_REMINDERS', true),
-    compressToolResults: envFlag('COMPRESS_TOOL_RESULTS', true),
-    // Variant C history-image: OFF by default. Round-3 spec marks the
-    // savings as MARGINAL (~1% per-call) against HIGH cache-topology risk.
-    // Flip via COMPRESS_HISTORY=1 or --history once telemetry shows the
-    // static-slab cache_control still hits.
-    compressHistory: envFlag('COMPRESS_HISTORY', false),
-    historyKeepTail: Number(process.env.HISTORY_KEEP_TAIL ?? 4),
-    historyMinPrefix: Number(process.env.HISTORY_MIN_PREFIX ?? 10),
-    minCompressChars: Number(process.env.MIN_COMPRESS_CHARS ?? 2000),
-    // Raised to 10,000 — the per-block break-even point at the current
-    // renderer config (Unifont 10px, cell 5×11, 100 cols). The real gate
-    // is `isCompressionProfitable()` in transform.ts; this is just a
-    // fast-path skip for the obvious-no cases. Keep in sync with DEFAULTS.
-    minReminderChars: Number(process.env.MIN_REMINDER_CHARS ?? 10000),
-    minToolResultChars: Number(process.env.MIN_TOOL_RESULT_CHARS ?? 10000),
-    cols: Number(process.env.COLS ?? 100),
-    // R2 multi-column ON (2 cols) — single-col drops below break-even on
-    // real tool-doc slabs. Override via MULTI_COL=1 or `--multi-col 1`.
-    multiCol: Math.max(1, Number(process.env.MULTI_COL ?? 2) | 0),
-    track: envFlag('PIXELPIPE_TRACK', true),
     eventsFile:
       process.env.PIXELPIPE_LOG ??
       path.join(os.homedir(), '.pixelpipe', 'events.jsonl'),
   };
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i]!;
-    const eat = () => argv[++i]!;
-    switch (a) {
-      case '-p':
-      case '--port':           o.port = Number(eat()); break;
-      case '--upstream':       o.upstream = eat(); break;
-      case '--no-compress':    o.compress = false; break;
-      case '--no-tools':       o.compressTools = false; break;
-      case '--no-schemas':     o.compressSchemas = false; break;
-      case '--no-reminders':   o.compressReminders = false; break;
-      case '--no-tool-results':o.compressToolResults = false; break;
-      case '--history':        o.compressHistory = true; break;
-      case '--no-history':     o.compressHistory = false; break;
-      case '--history-keep-tail': o.historyKeepTail = Number(eat()); break;
-      case '--history-min-prefix': o.historyMinPrefix = Number(eat()); break;
-      case '--min-chars':      o.minCompressChars = Number(eat()); break;
-      case '--min-reminder-chars': o.minReminderChars = Number(eat()); break;
-      case '--min-tool-result-chars': o.minToolResultChars = Number(eat()); break;
-      case '--cols':           o.cols = Number(eat()); break;
-      case '--multi-col':      o.multiCol = Math.max(1, Number(eat()) | 0); break;
-      case '--no-track':       o.track = false; break;
-      case '--events-file':    o.eventsFile = eat(); break;
-      case '-h':
-      case '--help':           printHelp(); process.exit(0);
-      case '--version':        printVersion(); process.exit(0);
-      default:
-        if (a.startsWith('--')) {
-          console.error(`[pixelpipe] unknown option: ${a}`);
-          process.exit(2);
-        }
-    }
-  }
-  return o;
 }
 
 function printHelp(): void {
   console.log(`pixelpipe — token-saving proxy for Claude Code
 
 Usage:
-  pixelpipe [options]                run the proxy
+  pixelpipe                run the proxy (no flags)
 
-Stats, sessions, and cleanup tools all live in the live dashboard at
+The proxy always compresses tools, schemas, reminders, tool_results,
+and history; always tracks events to disk; and always measures real
+saved_pct via /v1/messages/count_tokens. Single codepath, no knobs.
+
+Stats, sessions, and cleanup tools live in the dashboard at
   http://127.0.0.1:<port>/  (default port 47821)
 
-Options:
-  -p, --port <N>          listen port (default 47821)
-      --upstream <URL>    Anthropic API base (default https://api.anthropic.com)
-      --no-compress       disable all compression (pure passthrough)
-      --no-tools          don't fold tool docs into the image
-      --no-schemas        don't include input_schema JSON in the image
-      --no-reminders      don't image-compress <system-reminder> blocks
-      --no-tool-results   don't image-compress large tool_result content
-      --min-chars <N>     skip system compression below this many chars (default 2000)
-      --min-reminder-chars <N>  per-block fast-skip threshold for reminders (default 10000)
-      --min-tool-result-chars <N>  per-block fast-skip threshold for tool_results (default 10000)
-      --cols <N>          soft-wrap column count (default 100)
-      --multi-col <N>     R2: pack N text columns per image (default 2;
-                          set to 1 to disable. Higher N may exceed the
-                          1568px image-width cap and gets clamped.)
-      --no-track          disable persistent event tracking
-      --events-file <P>   JSONL events path (default ~/.pixelpipe/events.jsonl)
+Flags:
   -h, --help              show this help
       --version           show version
 
-Environment:
-  Same as flags via PORT, ANTHROPIC_UPSTREAM, COMPRESS, COMPRESS_TOOLS,
-  COMPRESS_SCHEMAS, COMPRESS_REMINDERS, COMPRESS_TOOL_RESULTS,
-  MIN_COMPRESS_CHARS, MIN_REMINDER_CHARS, MIN_TOOL_RESULT_CHARS,
-  COLS, MULTI_COL, PIXELPIPE_TRACK, PIXELPIPE_LOG.
+Environment (deployment-only):
+  PORT                    listen port (default 47821)
+  ANTHROPIC_UPSTREAM      upstream API base (default https://api.anthropic.com)
+  PIXELPIPE_LOG           JSONL events path (default ~/.pixelpipe/events.jsonl)
 
 Use with Claude Code:
   ANTHROPIC_BASE_URL=http://127.0.0.1:47821 claude
-
-  (pixelpipe now splits dynamic blocks itself, so the
-   --exclude-dynamic-system-prompt-sections flag is no longer required.)
 `);
 }
 
@@ -479,22 +399,12 @@ async function main(): Promise<void> {
   // tools live in the dashboard (see http://127.0.0.1:${port}/).
   const argv = process.argv.slice(2);
   const opts = parseCli(argv);
-  const transform: TransformOptions = {
-    compress: opts.compress,
-    compressTools: opts.compressTools,
-    compressSchemas: opts.compressSchemas,
-    compressReminders: opts.compressReminders,
-    compressToolResults: opts.compressToolResults,
-    compressHistory: opts.compressHistory,
-    historyKeepTail: opts.historyKeepTail,
-    historyMinPrefix: opts.historyMinPrefix,
-    minCompressChars: opts.minCompressChars,
-    minReminderChars: opts.minReminderChars,
-    minToolResultChars: opts.minToolResultChars,
-    cols: opts.cols,
-    multiCol: opts.multiCol,
-  };
-  const tracker: Tracker = opts.track ? new FileTracker(opts.eventsFile) : noopTracker;
+  // Transform options pass through empty — the proxy uses the DEFAULTS
+  // baked into transform.ts (every compression on, history on, all
+  // tuning parameters at their measured-best values). Per-request α
+  // injection happens later via the function-form `transform` in
+  // ProxyConfig so the gate gets the dashboard's live empirical rate.
+  const tracker: Tracker = new FileTracker(opts.eventsFile);
 
   // Sidecar dir for oversized 4xx request-body samples. Lives next to the
   // events.jsonl so a single `rm -rf` cleans up both. Lazy-mkdir'd on first
@@ -515,20 +425,14 @@ async function main(): Promise<void> {
 
   const config: ProxyConfig = {
     upstream: opts.upstream,
-    // Resolve transform options per request so the live empirical
-    // chars/token from dashboardState.fitCosts() flows into the
-    // isCompressionProfitable gate. With α at the stale default of 0.25
-    // (4 chars/tok), the gate rejects slabs as small as ~138K chars
-    // because the row-aware image-count estimate exceeds the textual
-    // token equivalence. Live α on Claude Code traffic runs ≈0.5-0.9
-    // — once the fit has 3+ samples, the gate auto-tunes and accepts
-    // compressions that the stale assumption was leaving on the table.
-    // When fit is null, falls through to the baked-in DEFAULTS.charsPerToken.
+    // Per-request transform options: inject the dashboard's live
+    // empirical chars/token into the break-even gate when the regression
+    // has converged. Everything else comes from DEFAULTS in transform.ts.
     transform: () => {
       const fit = dashboard.fitCosts();
       return fit && fit.chars_per_token > 0
-        ? { ...transform, charsPerToken: fit.chars_per_token }
-        : transform;
+        ? { charsPerToken: fit.chars_per_token }
+        : {};
     },
     onRequest: async (e) => {
       // Feed the dashboard BEFORE tracker.emit — toTrackEvent strips
@@ -621,11 +525,7 @@ async function main(): Promise<void> {
 
   server.listen(opts.port, () => {
     console.log(`[pixelpipe] listening on http://127.0.0.1:${opts.port} → ${opts.upstream}`);
-    console.log(
-      `[pixelpipe] config: compress=${opts.compress} tools=${opts.compressTools} schemas=${opts.compressSchemas} reminders=${opts.compressReminders} tool_results=${opts.compressToolResults} history=${opts.compressHistory} min=${opts.minCompressChars} cols=${opts.cols} multi_col=${opts.multiCol}`,
-    );
-    if (opts.track) console.log(`[pixelpipe] tracking events → ${opts.eventsFile}`);
-    else console.log('[pixelpipe] tracking disabled (--no-track or PIXELPIPE_TRACK=0)');
+    console.log(`[pixelpipe] tracking events → ${opts.eventsFile}`);
     console.log(`[pixelpipe] dashboard → http://127.0.0.1:${opts.port}/`);
   });
 

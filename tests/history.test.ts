@@ -374,19 +374,23 @@ describe('transformRequest + compressHistory', () => {
     );
   }
 
-  it('compressHistory:false (default) leaves messages array untouched', async () => {
+  it('compressHistory is always-on by default — input msgs are not mutated', async () => {
+    // The proxy ships with compressHistory baked in. This test pins the
+    // INVARIANT that even when history compression is active, the
+    // caller's `messages` array is not mutated in place — the function
+    // returns a new body and leaves the input object identical to its
+    // pre-call serialization.
     const msgs: Message[] = [];
     for (let i = 0; i < 12; i++) {
       msgs.push(i % 2 === 0 ? usr(bigPlain(3000)) : asst(bigPlain(3000)));
     }
     const before = JSON.stringify(msgs);
-    const { body, info } = await transformRequest(mkBody(msgs, bigPlain(60_000)));
-    expect(info.collapsedTurns).toBeUndefined();
-    expect(info.historyReason).toBeUndefined();
-    // The returned body's messages count equals the original
+    const { body } = await transformRequest(mkBody(msgs, bigPlain(60_000)));
+    // Input still byte-identical to its pre-call serialization.
+    expect(JSON.stringify(msgs)).toBe(before);
+    // And the returned body is valid JSON we can re-parse.
     const reparsed = JSON.parse(new TextDecoder().decode(body));
-    expect(reparsed.messages.length).toBe(msgs.length);
-    expect(JSON.stringify(msgs)).toBe(before); // input not mutated
+    expect(Array.isArray(reparsed.messages)).toBe(true);
   });
 
   it('compressHistory:true collapses an 8-closed + 2-live conversation', async () => {
