@@ -1709,6 +1709,74 @@ describe('transform', () => {
     expect(isCompressionProfitable(40000)).toBe(true);
   });
 
+  // --- Live-α override: gate auto-tunes when dashboard's chars/token diverges ---
+  //
+  // The default `CHARS_PER_TOKEN = 4` corresponds to Anthropic's English
+  // average (α=0.25). Real Claude Code traffic has α≈0.5-0.9 — JSON-dense
+  // tool definitions, structured CLAUDE.md slabs, etc. tokenize at 1.1-2
+  // chars/tok. The gate now accepts a per-request override so the host
+  // (node.ts) can pipe dashboardState.fitCosts().chars_per_token through.
+  //
+  // Production trace 2026-05-19: a 169_632-char slab with 88 lines of
+  // markdown got `not_profitable` rejected because the gate used 4 ch/tok
+  // (textEq=42_408) while actual upstream billed 148_891 tokens (ch/tok=
+  // 1.14). With the live override (1.14 ch/tok), the gate flips to ACCEPT.
+
+  it('isCompressionProfitable: stale default rejects newline-heavy 170K slab', () => {
+    // CLAUDE.md-like slab: many short lines, ~138K chars. Default ch/tok=4
+    // gives textEq=34_515 vs imgCost~95_000 (multiCol=2). Reject.
+    const slab = (
+      '## Section\n\n- Bullet point with reasonable length.\n- Another bullet.\n\n' +
+      '```ts\nconst x = 42;\nconst y = "string";\n```\n\n'
+    ).repeat(Math.floor(170000 / 160));
+    expect(isCompressionProfitable(slab, 100, undefined, 2)).toBe(false);
+  });
+
+  it('isCompressionProfitable: live α≈0.88 (1.14 ch/tok) flips the same slab to PROFITABLE', () => {
+    const slab = (
+      '## Section\n\n- Bullet point with reasonable length.\n- Another bullet.\n\n' +
+      '```ts\nconst x = 42;\nconst y = "string";\n```\n\n'
+    ).repeat(Math.floor(170000 / 160));
+    // 1.14 ch/tok ≈ the actual rate the upstream billed on the production
+    // event. Now textEq = len/1.14 ≈ 121K tokens vs imgCost ≈ 95K → ACCEPT.
+    expect(isCompressionProfitable(slab, 100, undefined, 2, 1.14)).toBe(true);
+  });
+
+  it('isCompressionProfitable: defensive clamp on bogus chars/token (≤0 / NaN → falls back to 4)', () => {
+    // Corrupt values would either crash or produce wildly wrong gate
+    // decisions. The function falls back to CHARS_PER_TOKEN=4 silently.
+    // Confirm: a 5000-char input is rejected at 4 ch/tok regardless of
+    // whether we pass 0, -1, NaN, or Infinity.
+    expect(isCompressionProfitable(5000, 100, undefined, 1, 0)).toBe(false);
+    expect(isCompressionProfitable(5000, 100, undefined, 1, -1)).toBe(false);
+    expect(isCompressionProfitable(5000, 100, undefined, 1, NaN)).toBe(false);
+    expect(isCompressionProfitable(5000, 100, undefined, 1, Infinity)).toBe(false);
+  });
+
+  it('TransformOptions.charsPerToken: low value unlocks a previously-rejected slab end-to-end', async () => {
+    // Borderline-newline-heavy slab that the DEFAULT gate rejects.
+    const slab = (
+      '## Section\n\n- Bullet point with reasonable length.\n- Another bullet.\n\n' +
+      '```ts\nconst x = 42;\nconst y = "string";\n```\n\n'
+    ).repeat(Math.floor(170000 / 160));
+    const req = JSON.stringify({
+      model: 'claude-3-5-sonnet',
+      messages: [{ role: 'user', content: 'hi' }],
+      system: slab,
+    });
+    const bytes = new TextEncoder().encode(req);
+
+    // Default ch/tok=4: rejected as not_profitable.
+    const stale = await transformRequest(bytes);
+    expect(stale.info.compressed).toBe(false);
+    expect(stale.info.reason).toMatch(/^not_profitable/);
+
+    // Live α equivalent (1.14 ch/tok): same slab now compresses.
+    const live = await transformRequest(bytes, { charsPerToken: 1.14 });
+    expect(live.info.compressed).toBe(true);
+    expect(live.info.imageCount ?? 0).toBeGreaterThan(0);
+  });
+
   // --- Adaptive break-even: CHARS_PER_IMAGE derived from atlas cell, not hardcoded ---
   // Brief: when font-rater swaps to a smaller cell (e.g. Cozette 4×7), more chars
   // pack into one image, so the N-image break-even thresholds shift. Tests below

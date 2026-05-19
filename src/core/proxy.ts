@@ -15,8 +15,12 @@ export interface ProxyConfig {
   upstream?: string;
   /** Override or supply an API key. If unset, we forward whatever the client sent. */
   apiKey?: string;
-  /** Per-request transform options. */
-  transform?: TransformOptions;
+  /** Per-request transform options. Pass a function when the host wants to
+   *  inject DYNAMIC values per request (e.g. live empirical `charsPerToken`
+   *  from the dashboard's converging fit) — the proxy invokes it once per
+   *  /v1/messages POST. Static object form is used by the Workers host and
+   *  tests that don't need dynamic state. */
+  transform?: TransformOptions | (() => TransformOptions);
   /** Called after every request — useful for logging / metrics in the host. */
   onRequest?: (event: ProxyEvent) => void | Promise<void>;
 }
@@ -321,7 +325,12 @@ export function createProxy(config: ProxyConfig = {}) {
     if (isMessages) {
       const bodyIn = new Uint8Array(await req.arrayBuffer());
       try {
-        const r = await transformRequest(bodyIn, config.transform);
+        // Resolve transform options per-request when the host passed a
+        // function — lets dashboardState.fitCosts()'s live α flow into
+        // isCompressionProfitable on every call.
+        const transformOpts =
+          typeof config.transform === 'function' ? config.transform() : config.transform;
+        const r = await transformRequest(bodyIn, transformOpts);
         // Cast: TS narrows Uint8Array<ArrayBufferLike> away from BodyInit, but
         // it's a valid body and we never use SharedArrayBuffer.
         bodyOut = r.body as unknown as BodyInit;

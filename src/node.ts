@@ -515,7 +515,21 @@ async function main(): Promise<void> {
 
   const config: ProxyConfig = {
     upstream: opts.upstream,
-    transform,
+    // Resolve transform options per request so the live empirical
+    // chars/token from dashboardState.fitCosts() flows into the
+    // isCompressionProfitable gate. With α at the stale default of 0.25
+    // (4 chars/tok), the gate rejects slabs as small as ~138K chars
+    // because the row-aware image-count estimate exceeds the textual
+    // token equivalence. Live α on Claude Code traffic runs ≈0.5-0.9
+    // — once the fit has 3+ samples, the gate auto-tunes and accepts
+    // compressions that the stale assumption was leaving on the table.
+    // When fit is null, falls through to the baked-in DEFAULTS.charsPerToken.
+    transform: () => {
+      const fit = dashboard.fitCosts();
+      return fit && fit.chars_per_token > 0
+        ? { ...transform, charsPerToken: fit.chars_per_token }
+        : transform;
+    },
     onRequest: async (e) => {
       // Feed the dashboard BEFORE tracker.emit — toTrackEvent strips
       // info.firstImagePng, so capturing has to happen on the raw event.

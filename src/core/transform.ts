@@ -84,6 +84,19 @@ export interface TransformOptions {
    *  off until a smoke test against the real slab confirms ordering.
    *  Auto-clamped if the resulting canvas would exceed 1568 px wide. */
   multiCol?: number;
+  /** Chars-per-token assumption used by `isCompressionProfitable()`. Default
+   *  4 (Anthropic's published English-text average ≈ α=0.25). The host can
+   *  inject the live empirical `chars_per_token` from `dashboardState.
+   *  fitCosts()` per-request — content with dense tokenization (JSON-heavy,
+   *  tool definitions, Claude Code's CLAUDE.md slabs at α≈0.5-0.9) makes
+   *  the stale 4 chars/tok wildly under-estimate text-token equivalence,
+   *  and the gate then rejects compressions that would actually save real
+   *  tokens. With the live value plumbed in, the gate auto-tightens or
+   *  loosens to match the model's actual tokenization rate.
+   *  Production trace 2026-05-19: 200+ events with slabs 113K-170K chars
+   *  hit `not_profitable` because the gate used 4 chars/tok while live α
+   *  was ≈0.88 (1.14 chars/tok) — gate was off by ~3.5× on the text side. */
+  charsPerToken?: number;
 }
 
 const DEFAULTS: Required<TransformOptions> = {
@@ -118,6 +131,10 @@ const DEFAULTS: Required<TransformOptions> = {
   compressHistory: false,
   historyKeepTail: 4,
   historyMinPrefix: 10,
+  // English ~4 chars/tok default (= the CHARS_PER_TOKEN constant declared
+  // later in this file — kept as a literal here to avoid forward-reference).
+  // Host overrides per-request when the dashboard's live fit has converged.
+  charsPerToken: 4,
   // R2 multi-column ON (2 cols) — at single-col the break-even gate
   // correctly rejects compression on real tool-doc-shaped slabs (~38 chars/
   // row → ~29 imgs vs 39k text tokens → net loss). Two columns packs ~2×
@@ -204,6 +221,12 @@ export function isCompressionProfitable(
   cols: number = DEFAULTS.cols,
   imageCountCap?: number,
   numCols: number = 1,
+  /** Chars-per-token assumption for the text side of the break-even math.
+   *  Default 4 (Anthropic's English-text average). Host can pass the live
+   *  empirical `chars_per_token` from dashboardState.fitCosts() so the gate
+   *  auto-tunes to the model's actual tokenization rate. Lower values =
+   *  more profitable text compressions (each char buys more tokens back). */
+  charsPerToken: number = CHARS_PER_TOKEN,
 ): boolean {
   const n = Math.max(1, numCols | 0);
   let estImages: number;
@@ -225,8 +248,14 @@ export function isCompressionProfitable(
   if (imageCountCap !== undefined && imageCountCap > 0) {
     estImages = Math.min(estImages, imageCountCap);
   }
+  // Defensive clamp: a corrupt or pathological charsPerToken (≤0 / NaN)
+  // would either crash or give a misleading-true. Fall back to the
+  // baked-in default in that case.
+  const cpt = Number.isFinite(charsPerToken) && charsPerToken > 0
+    ? charsPerToken
+    : CHARS_PER_TOKEN;
   const imageTokensCost = estImages * TOKENS_PER_IMAGE;
-  const textTokensEquivalent = textLen / CHARS_PER_TOKEN;
+  const textTokensEquivalent = textLen / cpt;
   return imageTokensCost < textTokensEquivalent;
 }
 
@@ -1241,7 +1270,7 @@ export async function transformRequest(
     Math.max(1, (o.multiCol | 0) || 1),
     Math.max(1, maxFittingCols(o.cols)),
   );
-  if (!isCompressionProfitable(combined, o.cols, undefined, numCols)) {
+  if (!isCompressionProfitable(combined, o.cols, undefined, numCols, o.charsPerToken)) {
     info.reason = `not_profitable (slab=${combined.length} chars)`;
     bumpPassthrough(info, 'not_profitable');
     info.outgoingTextChars = countOutgoingTextChars(req);
@@ -1345,7 +1374,7 @@ export async function transformRequest(
             continue;
           }
           const reminderText = (blk as TextBlock).text;
-          if (!isCompressionProfitable(reminderText, o.cols, undefined, numCols)) {
+          if (!isCompressionProfitable(reminderText, o.cols, undefined, numCols, o.charsPerToken)) {
             // Above threshold but image cost ≥ text cost. Net loss to compress.
             bumpPassthrough(info, 'not_profitable');
             processedExisting.push(blk);
@@ -1406,7 +1435,7 @@ export async function transformRequest(
               if (inner.length < o.minToolResultChars) {
                 bumpPassthrough(info, 'below_threshold');
                 rewritten.push(blk);
-              } else if (!isCompressionProfitable(inner, o.cols, o.maxImagesPerToolResult, numCols)) {
+              } else if (!isCompressionProfitable(inner, o.cols, o.maxImagesPerToolResult, numCols, o.charsPerToken)) {
                 bumpPassthrough(info, 'not_profitable');
                 rewritten.push(blk);
               } else {
@@ -1450,7 +1479,7 @@ export async function transformRequest(
                   newInner.push(ib as TextBlock | ImageBlock);
                   continue;
                 }
-                if (!isCompressionProfitable(innerText, o.cols, o.maxImagesPerToolResult, numCols)) {
+                if (!isCompressionProfitable(innerText, o.cols, o.maxImagesPerToolResult, numCols, o.charsPerToken)) {
                   bumpPassthrough(info, 'not_profitable');
                   newInner.push(ib as TextBlock | ImageBlock);
                   continue;
