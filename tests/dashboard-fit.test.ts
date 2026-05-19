@@ -244,4 +244,85 @@ describe('DashboardState.fitCosts() — empirical α/β regression', () => {
     dash.update(passthroughEvent(134_000));
     expect(dash.fitCosts()).toBeNull();
   });
+
+  describe('honest uncertainty band (alpha_low / alpha_high)', () => {
+    // These tests pin the per-sample p10/p90 α distribution so the
+    // dashboard headline can show "30–60% saved" when the regression's
+    // confidence is thin, instead of a fake-precise single number.
+
+    it('emits alpha_low ≤ alpha ≤ alpha_high (band straddles the point)', () => {
+      // Mix of densities → real per-sample spread.
+      dash.update(ev({ textChars: 100_000, pixels: 800_000, input: 30_000, cacheCreate: 10_000, cacheRead: 0 }));
+      dash.update(ev({ textChars: 120_000, pixels: 800_000, input: 40_000, cacheCreate: 12_000, cacheRead: 0 }));
+      dash.update(ev({ textChars: 80_000, pixels: 800_000, input: 25_000, cacheCreate: 8_000, cacheRead: 0 }));
+      const fit = dash.fitCosts();
+      expect(fit).not.toBeNull();
+      expect(fit!.alpha_low).toBeGreaterThan(0);
+      expect(fit!.alpha_low).toBeLessThanOrEqual(fit!.alpha);
+      expect(fit!.alpha).toBeLessThanOrEqual(fit!.alpha_high);
+    });
+
+    it('chars_per_token bounds are the inverse-ordered alpha bounds', () => {
+      // chars/tok is monotonically DECREASING in α. So
+      // chars_per_token_low corresponds to alpha_HIGH, and vice versa.
+      dash.update(ev({ textChars: 100_000, pixels: 800_000, input: 30_000, cacheCreate: 10_000, cacheRead: 0 }));
+      dash.update(ev({ textChars: 120_000, pixels: 800_000, input: 50_000, cacheCreate: 12_000, cacheRead: 0 }));
+      dash.update(ev({ textChars: 80_000, pixels: 800_000, input: 20_000, cacheCreate: 8_000, cacheRead: 0 }));
+      const fit = dash.fitCosts();
+      expect(fit).not.toBeNull();
+      expect(fit!.chars_per_token_low).toBeLessThanOrEqual(fit!.chars_per_token);
+      expect(fit!.chars_per_token).toBeLessThanOrEqual(fit!.chars_per_token_high);
+    });
+
+    it('serveStats exposes saved_pct_low ≤ saved_pct ≤ saved_pct_high', async () => {
+      dash.update(ev({ textChars: 100_000, pixels: 800_000, input: 30_000, cacheCreate: 10_000, cacheRead: 0 }));
+      dash.update(ev({ textChars: 120_000, pixels: 800_000, input: 50_000, cacheCreate: 12_000, cacheRead: 0 }));
+      dash.update(ev({ textChars: 80_000, pixels: 800_000, input: 20_000, cacheCreate: 8_000, cacheRead: 0 }));
+      const stats = await dash.serveStats().json();
+      expect(typeof stats.saved_pct).toBe('number');
+      expect(typeof stats.saved_pct_low).toBe('number');
+      expect(typeof stats.saved_pct_high).toBe('number');
+      expect(stats.saved_pct_low).toBeLessThanOrEqual(stats.saved_pct + 0.1);
+      expect(stats.saved_pct).toBeLessThanOrEqual(stats.saved_pct_high + 0.1);
+      // Bounds must be non-negative — pessimistic α below actual cost
+      // gets clamped to 0 rather than surfaced as a negative percentage.
+      expect(stats.saved_pct_low).toBeGreaterThanOrEqual(0);
+      expect(stats.saved_pct_high).toBeGreaterThanOrEqual(0);
+    });
+
+    it('honest range even when fit is null (n<3) — uses FALLBACK_ALPHA brackets', async () => {
+      // No events at all → cost_fit is null but we still need a defensible
+      // range on the headline. The fallback brackets (α_low=0.15,
+      // α_high=0.50) cover the plausible content-density universe; the
+      // headline collapses to a tautological 0% saved (no events) but the
+      // saved_pct_{low,high} keys MUST exist so the HTML never NaN's.
+      const stats = await dash.serveStats().json();
+      expect(stats.cost_fit).toBeNull();
+      expect(typeof stats.saved_pct_low).toBe('number');
+      expect(typeof stats.saved_pct_high).toBe('number');
+      expect(stats.saved_pct_low).toBe(0);
+      expect(stats.saved_pct_high).toBe(0);
+    });
+
+    it('fallback brackets fire during the n<3 warmup, then tighten as samples accumulate', async () => {
+      // n=0 events → fit=null → fallback brackets → low/high baselines
+      // are accumulated using α_low=0.15 and α_high=0.50 on EACH event.
+      // After 2 events we still have fit=null, so the cumulative low and
+      // high baselines should reflect the fallback rates, not collapse
+      // to the point estimate.
+      dash.update(ev({ textChars: 100_000, pixels: 800_000, input: 30_000, cacheCreate: 10_000, cacheRead: 0 }));
+      dash.update(ev({ textChars: 100_000, pixels: 800_000, input: 30_000, cacheCreate: 10_000, cacheRead: 0 }));
+      const statsWarmup = await dash.serveStats().json();
+      // Fit not yet active.
+      expect(statsWarmup.cost_fit).toBeNull();
+      // But the HIGH-α baseline is materially bigger than the point
+      // baseline (α=0.50 vs fallback 0.25 = 2× the text-replaced tokens).
+      expect(statsWarmup.effective_input_baseline_est_high).toBeGreaterThan(
+        statsWarmup.effective_input_baseline_est,
+      );
+      expect(statsWarmup.effective_input_baseline_est_low).toBeLessThan(
+        statsWarmup.effective_input_baseline_est,
+      );
+    });
+  });
 });

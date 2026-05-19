@@ -79,10 +79,28 @@ interface Totals {
   compressedRequests: number;
   /** Sum of weighted-token cost we actually paid upstream. */
   effectiveInputActual: number;
-  /** Sum of estimated cost if we had NOT compressed. */
+  /** Sum of estimated cost if we had NOT compressed (point estimate). */
   effectiveInputBaselineEst: number;
+  /** Pessimistic-α baseline (p10 of per-sample α, or fallback low bracket).
+   *  Drives `saved_pct_low` — the conservative bound on claimed savings. */
+  effectiveInputBaselineEstLow: number;
+  /** Optimistic-α baseline (p90 of per-sample α, or fallback high bracket).
+   *  Drives `saved_pct_high` — the upper bound on claimed savings. */
+  effectiveInputBaselineEstHigh: number;
   startedAt: number;
 }
+
+/** Fallback α brackets used when n<3 cold-miss samples and the regression
+ *  can't fire. Picked from "plausible content density" across realistic
+ *  Claude Code traffic:
+ *    - α_low  = 0.15  (≈ 6.7 chars/tok — prose-heavy)
+ *    - α      = 0.25  (≈ 4 chars/tok — Anthropic's published English avg)
+ *    - α_high = 0.50  (≈ 2 chars/tok — JSON-dense / dense tool definitions)
+ *  These give a deliberately wide saved_pct range so the operator sees
+ *  "calibrating" rather than a precise-looking but unfounded number. */
+const FALLBACK_ALPHA = 0.25;
+const FALLBACK_ALPHA_LOW = 0.15;
+const FALLBACK_ALPHA_HIGH = 0.5;
 
 /** Empirical per-image token cost (Opus 4.x at our typical 808×1568 render).
  *  history-researcher's round-3 measurement on N=33 cold-miss events from
@@ -144,6 +162,16 @@ function baselineCost(
   cacheCreate: number,
   cacheRead: number,
   fit: { alpha: number; beta: number } | null,
+  /** Optional α override used by the LOW/HIGH bound computations. When set,
+   *  replaces ONLY the chars-per-token side of the math; the image-token
+   *  side keeps using whatever regime `fit` selects (β·pixels if fit is
+   *  present, 2500/img fallback otherwise). This keeps the three baselines
+   *  consistent — they bracket the α-uncertainty alone, not the image-cost
+   *  model. Without this knob, swapping fit=null for fit={...,beta:1/750}
+   *  on the low/high paths would silently switch the image-cost regime
+   *  from "2500/img fallback" to "β·pixels", which can make the low bound
+   *  unintuitively GREATER than the point bound. */
+  alphaOverride?: number,
 ): number {
   // compressedChars is the actual text we IMAGE-encoded (static slab +
   // reminders + tool_results that passed the break-even gate). NOT the
@@ -157,9 +185,8 @@ function baselineCost(
   // we fall back to the stale 4-chars-per-token + 2500-tokens-per-image
   // constants, which are still in the right ballpark for Opus pre-4.7
   // single-col workloads.
-  const txtReplaced = fit
-    ? Math.floor(compressedChars * fit.alpha)
-    : Math.floor(compressedChars / 4);
+  const alphaEff = alphaOverride ?? (fit ? fit.alpha : 0.25);
+  const txtReplaced = Math.floor(compressedChars * alphaEff);
   const imgTokensEst = estImageTokens(imageCount, imagePixels, fit ? fit.beta : null);
   // extraText CAN be negative when image cost > text cost. Don't clamp —
   // surfaces honest negatives so the operator can see cost-bleed.
@@ -202,6 +229,8 @@ export class DashboardState {
     compressedRequests: 0,
     effectiveInputActual: 0,
     effectiveInputBaselineEst: 0,
+    effectiveInputBaselineEstLow: 0,
+    effectiveInputBaselineEstHigh: 0,
     startedAt: Date.now() / 1000,
   };
   private latestPng: Uint8Array | null = null;
@@ -265,24 +294,43 @@ export class DashboardState {
     // the stale constants in that case.
     const fit = this.fitCosts();
     const imgPx = (info as { imagePixels?: number } | undefined)?.imagePixels ?? 0;
-    const baselineEff =
-      haveUsage && compressed
-        ? baselineCost(
-            eff,
-            info?.compressedChars ?? 0,
-            info?.imageCount ?? 0,
-            imgPx,
-            cc,
-            cr,
-            fit ? { alpha: fit.alpha, beta: fit.beta } : null,
-          )
-        : eff;
+    // Three parallel baselines: point estimate + low/high uncertainty band.
+    // When fit is present we use its α (point) and the per-sample p10/p90
+    // as the band (alpha_low / alpha_high). When fit is null we use the
+    // FALLBACK_ALPHA brackets so the /proxy-stats range is always defined
+    // (operator sees "calibrating" range with explicit wide bounds,
+    // never a fake-precise single number).
+    //
+    // CRITICAL: we pass the SAME `fit` to all three calls and use the
+    // `alphaOverride` knob to vary only the chars-per-token side. This
+    // keeps the image-cost regime consistent across point/low/high so the
+    // bounds bracket α-uncertainty alone. Mixing regimes (e.g. β·pixels
+    // for low + 2500/img for point) made saved_pct_low > saved_pct in an
+    // earlier draft — that's silently incoherent.
+    const fitPoint = fit ? { alpha: fit.alpha, beta: fit.beta } : null;
+    const aLow = fit ? fit.alpha_low : FALLBACK_ALPHA_LOW;
+    const aHigh = fit ? fit.alpha_high : FALLBACK_ALPHA_HIGH;
+    const args: [number, number, number, number, number, number] = [
+      eff,
+      info?.compressedChars ?? 0,
+      info?.imageCount ?? 0,
+      imgPx,
+      cc,
+      cr,
+    ];
+    const baselineEff = haveUsage && compressed ? baselineCost(...args, fitPoint) : eff;
+    const baselineEffLow =
+      haveUsage && compressed ? baselineCost(...args, fitPoint, aLow) : eff;
+    const baselineEffHigh =
+      haveUsage && compressed ? baselineCost(...args, fitPoint, aHigh) : eff;
 
     const prevSaved = this.totals.effectiveInputBaselineEst - this.totals.effectiveInputActual;
     this.totals.requests += 1;
     if (compressed) this.totals.compressedRequests += 1;
     this.totals.effectiveInputActual += eff;
     this.totals.effectiveInputBaselineEst += baselineEff;
+    this.totals.effectiveInputBaselineEstLow += baselineEffLow;
+    this.totals.effectiveInputBaselineEstHigh += baselineEffHigh;
     const savedNow = this.totals.effectiveInputBaselineEst - this.totals.effectiveInputActual;
 
     const row: RecentRow = {
@@ -378,8 +426,16 @@ export class DashboardState {
    *  "constrained, β-pinned 25%" from "stale-constants wandering 25%". */
   fitCosts(): {
     alpha: number;
+    /** p10 of per-sample residual α across the fit ring. Drives the
+     *  conservative bound on saved_pct so the dashboard can be honest
+     *  about uncertainty instead of forcing a single number. */
+    alpha_low: number;
+    /** p90 of per-sample residual α across the fit ring. */
+    alpha_high: number;
     beta: number;
     chars_per_token: number;
+    chars_per_token_low: number;
+    chars_per_token_high: number;
     pixels_per_token: number;
     single_col_tokens_per_img: number;
     multicol2_tokens_per_img: number;
@@ -455,6 +511,31 @@ export class DashboardState {
     // identify β separately. See the THREE-MODE LADDER docstring above.
     const ANTHROPIC_BETA = 1 / 750;
 
+    /** Build the per-sample residual α distribution given a known β. Each
+     *  sample yields `α_i = (tokens_i - β·pixels_i) / text_chars_i` — the
+     *  α we'd infer from that single event alone, treating image cost as
+     *  known. p10/p90 of this distribution gives an honest empirical
+     *  uncertainty band on α without doing a bootstrap.
+     *
+     *  Negative or non-finite values are filtered: they'd come from
+     *  numerical noise on tiny text_chars, and we'd rather under-report
+     *  the band than have it contaminated by garbage samples. */
+    const perSampleAlpha = (betaUsed: number): { low: number; high: number } => {
+      const ratios: number[] = [];
+      for (const s of samples) {
+        if (s.text_chars <= 0) continue;
+        const r = (s.tokens - betaUsed * s.pixels) / s.text_chars;
+        if (Number.isFinite(r) && r > 0) ratios.push(r);
+      }
+      if (ratios.length === 0) return { low: 0, high: 0 };
+      ratios.sort((a, b) => a - b);
+      // Use min/max for n≤3, p10/p90 for larger samples. The dashboard
+      // operator sees the bracket grow tighter as more events stream in.
+      const idxLow = ratios.length <= 3 ? 0 : Math.floor(ratios.length * 0.1);
+      const idxHigh = ratios.length <= 3 ? ratios.length - 1 : Math.floor(ratios.length * 0.9);
+      return { low: ratios[idxLow]!, high: ratios[idxHigh]! };
+    };
+
     // ---- Mode 1: joint OLS (both columns vary) ----
     if (cvX >= MIN_CV_JOINT && cvP >= MIN_CV_JOINT) {
       const det = sxx * syy - sxy * sxy;
@@ -464,10 +545,20 @@ export class DashboardState {
         // Guard against degenerate fits (negative rates mean the data is too
         // noisy / multi-modal to give a clean linear answer).
         if (alpha > 0 && beta > 0) {
+          const band = perSampleAlpha(beta);
+          // Order-clamp + positive-clamp the bracket against the central
+          // point estimate so a single noisy sample can't make low > point
+          // or high < point.
+          const aLow = Math.max(0.01, Math.min(band.low, alpha));
+          const aHigh = Math.max(alpha, band.high);
           return {
             alpha: round4(alpha),
+            alpha_low: round4(aLow),
+            alpha_high: round4(aHigh),
             beta: round4(beta * 1000) / 1000, // β is tiny — keep 6 sig figs effectively
             chars_per_token: round1(1 / alpha),
+            chars_per_token_low: round1(1 / aHigh),  // inverse: high α → low chars/tok
+            chars_per_token_high: round1(1 / aLow),
             pixels_per_token: Math.round(1 / beta),
             single_col_tokens_per_img: Math.round(508 * 1559 * beta),
             multicol2_tokens_per_img: Math.round(1028 * 1559 * beta),
@@ -496,10 +587,17 @@ export class DashboardState {
     if (cvX < MIN_CV_CONSTRAINED || sxx === 0) return null;
     const alphaConstrained = (sxt - ANTHROPIC_BETA * sxy) / sxx;
     if (alphaConstrained <= 0) return null;
+    const bandConstrained = perSampleAlpha(ANTHROPIC_BETA);
+    const aLowC = Math.max(0.01, Math.min(bandConstrained.low, alphaConstrained));
+    const aHighC = Math.max(alphaConstrained, bandConstrained.high);
     return {
       alpha: round4(alphaConstrained),
+      alpha_low: round4(aLowC),
+      alpha_high: round4(aHighC),
       beta: round4(ANTHROPIC_BETA * 1000) / 1000,
       chars_per_token: round1(1 / alphaConstrained),
+      chars_per_token_low: round1(1 / aHighC),
+      chars_per_token_high: round1(1 / aLowC),
       pixels_per_token: Math.round(1 / ANTHROPIC_BETA),
       single_col_tokens_per_img: Math.round(508 * 1559 * ANTHROPIC_BETA),
       multicol2_tokens_per_img: Math.round(1028 * 1559 * ANTHROPIC_BETA),
@@ -578,9 +676,25 @@ export class DashboardState {
 
   serveStats(): Response {
     const saved = this.totals.effectiveInputBaselineEst - this.totals.effectiveInputActual;
+    const savedLow = this.totals.effectiveInputBaselineEstLow - this.totals.effectiveInputActual;
+    const savedHigh = this.totals.effectiveInputBaselineEstHigh - this.totals.effectiveInputActual;
     const pct =
       this.totals.effectiveInputBaselineEst > 0
         ? (saved / this.totals.effectiveInputBaselineEst) * 100
+        : 0;
+    // Bounds: use the BOUND'S OWN denominator so each rate is internally
+    // consistent (a "low baseline" world should compare against itself,
+    // not against the point baseline). Both clamped at 0% downside —
+    // negative savings (baseline-low < actual) means our pessimistic α
+    // attributed less to text than we actually paid; surface as 0 rather
+    // than a negative percentage that confuses the operator.
+    const pctLow =
+      this.totals.effectiveInputBaselineEstLow > 0
+        ? Math.max(0, (savedLow / this.totals.effectiveInputBaselineEstLow) * 100)
+        : 0;
+    const pctHigh =
+      this.totals.effectiveInputBaselineEstHigh > 0
+        ? Math.max(0, (savedHigh / this.totals.effectiveInputBaselineEstHigh) * 100)
         : 0;
     const uptimeSec = Date.now() / 1000 - this.totals.startedAt;
     const payload = {
@@ -588,8 +702,19 @@ export class DashboardState {
       compressed_requests: this.totals.compressedRequests,
       effective_input_actual: round1(this.totals.effectiveInputActual),
       effective_input_baseline_est: round1(this.totals.effectiveInputBaselineEst),
+      effective_input_baseline_est_low: round1(this.totals.effectiveInputBaselineEstLow),
+      effective_input_baseline_est_high: round1(this.totals.effectiveInputBaselineEstHigh),
       saved_effective_tokens: round1(saved),
+      saved_effective_tokens_low: round1(Math.max(0, savedLow)),
+      saved_effective_tokens_high: round1(Math.max(0, savedHigh)),
       saved_pct: round1(pct),
+      // Honest uncertainty band on the headline saved_pct. Derived from
+      // per-sample α p10/p90 when ≥3 fit samples exist, else from wide
+      // FALLBACK_ALPHA brackets. When (high - low) ≥ 5pp the dashboard
+      // shows the range INSTEAD of the point — being honest beats being
+      // precise-looking.
+      saved_pct_low: round1(pctLow),
+      saved_pct_high: round1(pctHigh),
       saved_usd_opus47: round4((saved * 15.0) / 1e6),
       uptime_sec: uptimeSec,
       // Empirical cost fit — null until ≥3 cold-miss events with the new
@@ -962,7 +1087,23 @@ async function tick() {
     document.getElementById('m_saved_sub').textContent =
       \`\${numFmt(s.effective_input_actual)} paid · \${numFmt(s.effective_input_baseline_est)} baseline\`;
     document.getElementById('m_usd').textContent = \`$\${s.saved_usd_opus47.toFixed(4)}\`;
-    document.getElementById('m_pct').textContent = \`\${s.saved_pct.toFixed(1)}%\`;
+    // Honesty range. When the p10/p90 spread is ≥5pp we lead with the
+    // range INSTEAD of the point estimate — a "30–62%" reading tells the
+    // operator "we're saving real money but our α isn't sharp enough to
+    // promise a single number." Tight spread (<5pp) collapses to the
+    // point. No-fit-yet case (mode=null) always shows a range from the
+    // FALLBACK_ALPHA brackets so the headline is never falsely precise.
+    const pctPoint = s.saved_pct;
+    const pctLo = (typeof s.saved_pct_low === 'number') ? s.saved_pct_low : pctPoint;
+    const pctHi = (typeof s.saved_pct_high === 'number') ? s.saved_pct_high : pctPoint;
+    const spread = pctHi - pctLo;
+    const showRange = spread >= 5;
+    document.getElementById('m_pct').textContent = showRange
+      ? \`\${pctLo.toFixed(0)}–\${pctHi.toFixed(0)}%\`
+      : \`\${pctPoint.toFixed(1)}%\`;
+    document.getElementById('m_pct_sub').textContent = showRange
+      ? \`point \${pctPoint.toFixed(1)}% · vs uncompressed baseline\`
+      : 'vs uncompressed baseline';
     // Surface which cost-model regime the headline number came from. Three
     // states (mirror the THREE-MODE LADDER in dashboard.ts fitCosts):
     //   joint        — α and β both measured (≥10 samples = high confidence)
@@ -972,7 +1113,9 @@ async function tick() {
     const fit = s.cost_fit;
     const regime = document.getElementById('m_pct_regime');
     if (!fit) {
-      regime.textContent = 'stale constants (no fit yet)';
+      // Headline shows a wide range from FALLBACK_ALPHA brackets — make it
+      // explicit that we're calibrating, not claiming a precise number.
+      regime.textContent = 'calibrating · need 3+ cold-miss samples for empirical α';
       regime.style.color = '#d29922'; // amber: be skeptical
     } else {
       // Show text_cv as a percentage so the operator can judge α-confidence
