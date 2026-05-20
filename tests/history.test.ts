@@ -474,19 +474,50 @@ describe('transformRequest history compression (always-on)', () => {
     expect(info.historyReason).toBe('collapsed');
     expect(info.collapsedTurns).toBe(10);
 
-    // Counterfactual: a host override slightly above 4 (= "English-prose
-    // worse than the static default") forces the gate back into rejection
-    // territory. We use 4.5 rather than 4 because passing exactly the
-    // DEFAULTS value (4) collides with the `!== CHARS_PER_TOKEN` branch
-    // and gets re-rewritten to HISTORY_CHARS_PER_TOKEN — by design, so
-    // unspecified-host requests still get the empirical cpt. 4.5 bypasses
-    // that override gate and confirms the fix actually flows through the
-    // cpt argument, not some other side-effect.
+    // Counterfactual: a host override above 4 (= "English-prose territory,
+    // but worse than the historical default") forces the gate back into
+    // rejection — confirms the fix actually flows through the `cpt`
+    // argument, not some other side-effect. After fragility #2 (override-
+    // gate default-value collision), the override-gate uses `!== undefined`
+    // so 4.5 is honored as an explicit override on its own merits, not
+    // because it differs from any sentinel.
     const stale = await transformRequest(mkBody(msgs, bigPlain(80_000)), {
       charsPerToken: 4.5,
     });
     expect(stale.info.historyReason).toBe('not_profitable');
     expect(stale.info.collapsedTurns).toBeUndefined();
+  });
+
+  it('explicit charsPerToken=4 is honored end-to-end (no silent swap to constants)', async () => {
+    // Regression for fragility #2: the override-gate previously used a
+    // `!== CHARS_PER_TOKEN` check that silently swapped 4 → SLAB_CHARS_PER_TOKEN
+    // (2.5) for unspecified hosts. That coupling broke the distinction
+    // between "host didn't override" and "host deliberately wants 4". The
+    // gate now uses `!== undefined` so a literal 4 stays a literal 4.
+    //
+    // Observable proof: a borderline-density fixture (1200-char bodies × 14
+    // turns) that is rejected at cpt=4 but accepted at cpt=2.5. If the gate
+    // silently swapped explicit 4 → 2.5, this fixture would collapse — but
+    // with the fix it stays rejected, confirming the gate honored the literal
+    // 4. The companion test below pins cpt=2.5 collapse on the same shape.
+    const msgs: Message[] = [];
+    for (let i = 0; i < 14; i++) {
+      const body = `turn ${i}: ` + bigPlain(1200);
+      msgs.push(i % 2 === 0 ? usr(body) : asst(body));
+    }
+    const explicit4 = await transformRequest(mkBody(msgs, bigPlain(80_000)), {
+      charsPerToken: 4,
+    });
+    expect(explicit4.info.historyReason).toBe('not_profitable');
+    expect(explicit4.info.collapsedTurns).toBeUndefined();
+
+    // Same shape at cpt=2.5 collapses — proves the fixture actually straddles
+    // the threshold and isn't a tautology.
+    const explicit25 = await transformRequest(mkBody(msgs, bigPlain(80_000)), {
+      charsPerToken: 2.5,
+    });
+    expect(explicit25.info.historyReason).toBe('collapsed');
+    expect(explicit25.info.collapsedTurns).toBe(10);
   });
 
   it('history-image blocks carry NO cache_control (conservative first-cut)', async () => {

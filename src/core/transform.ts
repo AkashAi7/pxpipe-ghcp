@@ -1402,8 +1402,10 @@ export async function transformRequest(
   // English-prose default 4 baked into CHARS_PER_TOKEN. Use a slab-specific
   // upper-bound cpt at this gate so JSON-dense system + tool-doc content
   // gets a fair break-even check. Host can still override via
-  // `o.charsPerToken` (e.g., to plug in a live empirical fit).
-  const slabCpt = o.charsPerToken !== undefined && o.charsPerToken !== CHARS_PER_TOKEN
+  // `opts.charsPerToken` (e.g., to plug in a live empirical fit).
+  // Discriminate on the *raw* `opts` so a host that genuinely wants the
+  // English-prose `4` can pin to it without colliding with the merged default.
+  const slabCpt = opts.charsPerToken !== undefined
     ? o.charsPerToken
     : SLAB_CHARS_PER_TOKEN;
   if (!isCompressionProfitable(combined, o.cols, undefined, numCols, slabCpt)) {
@@ -1701,9 +1703,12 @@ export async function transformRequest(
     // count after wrapping.
     // History cpt is empirically ~1.09 (N=10 rejected-events sample) — JSON-
     // dense like the slab, so use the same conservative upper-bound cpt
-    // baked into HISTORY_CHARS_PER_TOKEN=2.5. Host override (o.charsPerToken)
+    // baked into HISTORY_CHARS_PER_TOKEN=2.5. Host override (opts.charsPerToken)
     // wins if the dashboard ever feeds back a live empirical fit.
-    const historyCpt = o.charsPerToken !== undefined && o.charsPerToken !== CHARS_PER_TOKEN
+    // Same discriminator as the slab path: check the *raw* `opts` so a host
+    // that genuinely wants `4` can pin to it without colliding with the merged
+    // default.
+    const historyCpt = opts.charsPerToken !== undefined
       ? o.charsPerToken
       : HISTORY_CHARS_PER_TOKEN;
     const historyProfitable = (text: string, cols: number): boolean =>

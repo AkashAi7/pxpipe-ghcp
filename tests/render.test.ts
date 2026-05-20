@@ -1900,6 +1900,44 @@ describe('transform', () => {
     expect(isCompressionProfitable(slab, 100, undefined, 2, 2.5)).toBe(true);
   });
 
+  it('TransformOptions.charsPerToken: explicit 4 is honored (no silent swap to SLAB_CHARS_PER_TOKEN)', async () => {
+    // Fragility #2 regression: the override-gate previously used a `!==
+    // CHARS_PER_TOKEN` check that silently swapped 4 → 2.5 because the static
+    // default *also* happens to be 4. After the fix it uses `!== undefined`,
+    // so passing exactly 4 is honored as an explicit override.
+    //
+    // Observable proof: the 161k production-shape slab is REJECTED at cpt=4
+    // (text=40,275 tok < image=44,000 tok) and ACCEPTED at the built-in
+    // SLAB_CHARS_PER_TOKEN=2.5 (text=64,440 tok). If the collision bypass
+    // breaks, the slab will compress under an explicit `4` — which would
+    // mean the host can't ever pin to the conservative English-prose value.
+    const parts: string[] = [];
+    let acc = 0;
+    const target = 161_101;
+    while (acc < target) {
+      const len = 60 + (acc % 40);
+      parts.push('A'.repeat(len) + (acc % 200 === 0 ? '   ' : ''));
+      acc += len + 1;
+    }
+    const slab = parts.join('\n').slice(0, target);
+    const req = JSON.stringify({
+      model: 'claude-3-5-sonnet',
+      messages: [{ role: 'user', content: 'hi' }],
+      system: slab,
+    });
+    const bytes = new TextEncoder().encode(req);
+
+    // Built-in cpt (no override): slab compresses via SLAB_CHARS_PER_TOKEN=2.5.
+    const builtin = await transformRequest(bytes, { multiCol: 2 });
+    expect(builtin.info.compressed).toBe(true);
+
+    // Explicit cpt=4: host pinned to the English-prose value. The slab gate
+    // must honor it and reject the slab — not silently fall back to 2.5.
+    const overridden = await transformRequest(bytes, { multiCol: 2, charsPerToken: 4 });
+    expect(overridden.info.compressed).toBe(false);
+    expect(overridden.info.reason).toMatch(/^not_profitable/);
+  });
+
   // --- Adaptive break-even: CHARS_PER_IMAGE derived from atlas cell, not hardcoded ---
   // Brief: when font-rater swaps to a smaller cell (e.g. Cozette 4×7), more chars
   // pack into one image, so the N-image break-even thresholds shift. Tests below
