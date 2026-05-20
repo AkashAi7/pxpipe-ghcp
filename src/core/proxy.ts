@@ -261,91 +261,6 @@ function filterHeaders(src: Headers, strip: Set<string>): Headers {
   return out;
 }
 
-/** /v1/messages/count_tokens accepts a strict subset of /v1/messages params.
- *  Anything else (`stream`, `max_tokens`, `temperature`, `top_p`, `top_k`,
- *  `stop_sequences`, `metadata`, `service_tier`) makes it 400 with
- *  "Unknown parameter". This was the silent-null bug in the probe path —
- *  we forwarded the verbatim /v1/messages body and got 400s.
- *
- *  Returns a fresh JSON Uint8Array with only the accepted fields, or null
- *  if the input can't be parsed (probe gets skipped, dashboard falls back
- *  to estimate). */
-const COUNT_TOKENS_FIELDS = new Set([
-  'model',
-  'messages',
-  'system',
-  'tools',
-  'tool_choice',
-  'thinking',
-  'mcp_servers',
-]);
-
-function buildCountTokensBody(bytes: Uint8Array): Uint8Array | null {
-  try {
-    const obj = JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>;
-    const out: Record<string, unknown> = {};
-    for (const k of Object.keys(obj)) {
-      if (COUNT_TOKENS_FIELDS.has(k)) out[k] = obj[k];
-    }
-    // model is required by the endpoint; refuse to probe without it
-    if (typeof out.model !== 'string' || !Array.isArray(out.messages)) return null;
-    return new TextEncoder().encode(JSON.stringify(out));
-  } catch {
-    return null;
-  }
-}
-
-/** Ask the upstream /v1/messages/count_tokens endpoint to tokenize a body
- *  using the same auth + headers we'd send to /v1/messages. Returns the
- *  exact input_tokens count or null on any failure (4xx, 5xx, network
- *  error, missing field). count_tokens is documented as free — Anthropic
- *  does not bill input tokens for it — so we use it to measure ground-
- *  truth pre/post-transform sizes without estimation.
- *
- *  Failure is never fatal: when this returns null the caller skips the
- *  measurement and the dashboard falls back to the regression estimate. */
-async function countTokensUpstream(
-  upstream: string,
-  body: BodyInit,
-  headers: Headers,
-  label: string,
-): Promise<number | null> {
-  try {
-    const res = await fetch(upstream + '/v1/messages/count_tokens', {
-      method: 'POST',
-      headers,
-      body,
-      ...(body instanceof ReadableStream ? { duplex: 'half' } : {}),
-    } as RequestInit);
-    if (!res.ok) {
-      // Diagnostic: surface the actual failure mode. count_tokens has
-      // returned null silently in production; this exposes whether it's
-      // auth (401/403), bad request (400), rate limit (429), or upstream.
-      let snippet = '';
-      try {
-        snippet = (await res.text()).slice(0, 300);
-      } catch {
-        /* body read failed — keep snippet empty */
-      }
-      // eslint-disable-next-line no-console
-      console.warn(`[count_tokens:${label}] HTTP ${res.status}: ${snippet}`);
-      return null;
-    }
-    const text = await res.text();
-    const json = JSON.parse(text) as { input_tokens?: unknown };
-    const n = typeof json.input_tokens === 'number' ? json.input_tokens : null;
-    if (n === null) {
-      // eslint-disable-next-line no-console
-      console.warn(`[count_tokens:${label}] missing input_tokens in: ${text.slice(0, 300)}`);
-    }
-    return n;
-  } catch (e) {
-    // eslint-disable-next-line no-console
-    console.warn(`[count_tokens:${label}] threw: ${(e as Error).message}`);
-    return null;
-  }
-}
-
 /** Build the proxy fetch handler bound to a config. */
 export function createProxy(config: ProxyConfig = {}) {
   const upstream = (config.upstream ?? DEFAULT_UPSTREAM).replace(/\/+$/, '');
@@ -384,20 +299,6 @@ export function createProxy(config: ProxyConfig = {}) {
             // gzip failure is non-fatal — drop the body sample, keep the rest.
           }
         }
-        // If count_tokens measurement was kicked off in parallel, await it
-        // here so the resulting numbers land on `info` BEFORE the host's
-        // onRequest fires (which is what persists the event). null results
-        // (measurement failed) are silently dropped — the dashboard falls
-        // back to the α-regression estimate when these fields are absent.
-        if (measurePromise && info) {
-          try {
-            const m = await measurePromise;
-            if (m.baseline !== null) info.baselineTokensMeasured = m.baseline;
-            if (m.actual !== null) info.actualTokensMeasured = m.actual;
-          } catch {
-            // measurement failed — drop, keep the rest of the event intact.
-          }
-        }
         await config.onRequest?.({
           method: req.method,
           path: url.pathname,
@@ -421,16 +322,6 @@ export function createProxy(config: ProxyConfig = {}) {
     let bodyOut: BodyInit | null = null;
     let info: TransformInfo | undefined;
 
-    // Ground-truth token-count measurement. Fires /v1/messages/count_tokens
-    // on the pre-transform and post-transform bodies in parallel with the
-    // main upstream forward. Results land on info.{baselineTokensMeasured,
-    // actualTokensMeasured} and the dashboard reports the real saved_pct
-    // from these exact numbers — no α/β estimation.
-    let measurePromise: Promise<{
-      baseline: number | null;
-      actual: number | null;
-    }> | undefined;
-
     if (isMessages) {
       const bodyIn = new Uint8Array(await req.arrayBuffer());
       try {
@@ -452,31 +343,6 @@ export function createProxy(config: ProxyConfig = {}) {
           reqBodySha8 = await sha8Bytes(r.body);
         }
 
-        // Kick off the count_tokens probes BEFORE forwarding /v1/messages so
-        // they run in parallel with the main request. Headers are filtered
-        // exactly like the main request — same auth, same model, same
-        // anthropic-version. Failure is silent: a null result drops the
-        // measurement on this event without affecting the forwarded response.
-        //
-        // CRITICAL: /v1/messages/count_tokens accepts ONLY a subset of the
-        // /v1/messages fields. Forwarding the verbatim body causes a 400
-        // ("Unknown parameter: stream" etc.) and the probe returns null.
-        // We strip to the accepted fields here. content-length is also
-        // already in STRIP_REQ_HEADERS — fetch recomputes it from the new
-        // body — so we don't need to touch headers further.
-        const ctHeaders = filterHeaders(req.headers, STRIP_REQ_HEADERS);
-        ctHeaders.set('content-type', 'application/json');
-        if (config.apiKey) ctHeaders.set('x-api-key', config.apiKey);
-        const baselineBody = buildCountTokensBody(bodyIn);
-        const actualBody = buildCountTokensBody(r.body);
-        measurePromise = Promise.all([
-          baselineBody
-            ? countTokensUpstream(upstream, baselineBody as unknown as BodyInit, ctHeaders, 'baseline')
-            : Promise.resolve(null),
-          actualBody
-            ? countTokensUpstream(upstream, actualBody as unknown as BodyInit, ctHeaders, 'actual')
-            : Promise.resolve(null),
-        ]).then(([baseline, actual]) => ({ baseline, actual }));
       } catch (e) {
         fire(502, undefined, `transform_error: ${(e as Error).message}`);
         return new Response(JSON.stringify({ error: 'pixelpipe transform failed' }), {

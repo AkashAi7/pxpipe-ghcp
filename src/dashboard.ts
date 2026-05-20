@@ -99,18 +99,6 @@ interface Totals {
   /** Optimistic-α baseline (p90 of per-sample α, or wide fallback).
    *  Drives `saved_pct_high` — the upper bound on claimed savings. */
   effectiveCostBaselineHigh: number;
-  /** Number of events that carried both baseline_tokens_measured AND
-   *  actual_tokens_measured (i.e. count_tokens succeeded on both sides).
-   *  Drives the headline switch: when ≥1, the dashboard reports
-   *  saved_pct_measured INSTEAD of the regression estimate. */
-  measuredEvents: number;
-  /** Cumulative actual cost over the subset of events that had ground-
-   *  truth measurement available. Always ≤ effectiveCostActual. */
-  effectiveCostActualMeasured: number;
-  /** Cumulative MEASURED baseline cost — derived from the actual cost
-   *  plus the exact delta-tokens count_tokens reported, billed at the
-   *  same cache-mix rate as the actual call. No α estimation involved. */
-  effectiveCostBaselineMeasured: number;
   startedAt: number;
 }
 
@@ -315,9 +303,6 @@ export class DashboardState {
     effectiveCostBaseline: 0,
     effectiveCostBaselineLow: 0,
     effectiveCostBaselineHigh: 0,
-    measuredEvents: 0,
-    effectiveCostActualMeasured: 0,
-    effectiveCostBaselineMeasured: 0,
     startedAt: Date.now() / 1000,
   };
   private latestPng: Uint8Array | null = null;
@@ -431,34 +416,6 @@ export class DashboardState {
     this.totals.effectiveCostBaseline += baselineEff;
     this.totals.effectiveCostBaselineLow += baselineEffLow;
     this.totals.effectiveCostBaselineHigh += baselineEffHigh;
-
-    // Ground-truth measurement path: when the proxy fired count_tokens on
-    // both bodies and got real numbers back, fold those into a SEPARATE
-    // cumulative pair. The dashboard reports saved_pct_measured from these
-    // when ≥1 event has them. No α/β estimation — the delta is exact.
-    const measBase = (info as { baselineTokensMeasured?: number } | undefined)?.baselineTokensMeasured;
-    const measActual = (info as { actualTokensMeasured?: number } | undefined)?.actualTokensMeasured;
-    if (
-      haveUsage
-      && typeof measBase === 'number'
-      && typeof measActual === 'number'
-      && measBase >= 0
-      && measActual >= 0
-    ) {
-      const deltaTokens = measBase - measActual;
-      // Bill the delta at the same cache-mix rate the actual call paid.
-      // When the call had no cache activity (cc=0 and cr=0), fall back to
-      // 0.1× (cache_read rate) — the most conservative cache-mix choice.
-      const cachedTotal = cc + cr;
-      const billRate =
-        cachedTotal > 0
-          ? (cc / cachedTotal) * 1.25 + (cr / cachedTotal) * 0.1
-          : 0.1;
-      const measuredBaselineEff = eff + deltaTokens * billRate;
-      this.totals.measuredEvents += 1;
-      this.totals.effectiveCostActualMeasured += eff;
-      this.totals.effectiveCostBaselineMeasured += measuredBaselineEff;
-    }
 
     const savedNow = this.totals.effectiveCostBaseline - this.totals.effectiveCostActual;
 
@@ -849,28 +806,6 @@ export class DashboardState {
       // precise-looking.
       saved_pct_low: round1(pctLow),
       saved_pct_high: round1(pctHigh),
-      // Ground-truth measurement path. Populated ONLY when ≥1 event
-      // carried both baseline_tokens_measured AND actual_tokens_measured
-      // (i.e. count_tokens succeeded on both probes). No estimation:
-      // saved_pct_measured = (baseline_measured - actual_measured) / baseline_measured.
-      // When non-null, the HTML headline displays these instead of the
-      // regression estimate.
-      measured_events: this.totals.measuredEvents,
-      effective_cost_actual_measured:
-        this.totals.measuredEvents > 0 ? round1(this.totals.effectiveCostActualMeasured) : null,
-      effective_cost_baseline_measured:
-        this.totals.measuredEvents > 0 ? round1(this.totals.effectiveCostBaselineMeasured) : null,
-      saved_effective_tokens_measured:
-        this.totals.measuredEvents > 0
-          ? round1(this.totals.effectiveCostBaselineMeasured - this.totals.effectiveCostActualMeasured)
-          : null,
-      saved_pct_measured:
-        this.totals.measuredEvents > 0 && this.totals.effectiveCostBaselineMeasured > 0
-          ? round1(
-              ((this.totals.effectiveCostBaselineMeasured - this.totals.effectiveCostActualMeasured)
-                / this.totals.effectiveCostBaselineMeasured) * 100,
-            )
-          : null,
       // Headline dollar number. Uses the ASSUMED input rate published
       // in `pricing_assumptions` below so the operator can verify what we
       // multiplied by. Drops the "_opus47" suffix because the rate is now
@@ -1364,20 +1299,13 @@ async function tick() {
         ? \`point $\${usdPoint.toFixed(4)} · at $\${inRate}/M input tokens\`
         : \`at $\${inRate}/M input tokens · see pricing_assumptions\`;
     }
-    // Headline priority:
-    //   1. Ground-truth measured saved_pct (count_tokens on both bodies) —
-    //      no estimation, exact tokenizer output. Shown when ≥1 event has
-    //      both measurements (the count_tokens probes are unconditional).
-    //   2. Otherwise (every probe failed so far), honest uncertainty range
-    //      from per-sample α p10/p90. When spread ≥5pp we show the range
-    //      INSTEAD of the point estimate; tight spread collapses to point.
-    const haveMeasured =
-      typeof s.saved_pct_measured === 'number' && (s.measured_events ?? 0) > 0;
-    if (haveMeasured) {
-      document.getElementById('m_pct').textContent = \`\${s.saved_pct_measured.toFixed(1)}%\`;
-      document.getElementById('m_pct_sub').textContent =
-        \`measured · count_tokens on \${s.measured_events} request\${s.measured_events === 1 ? '' : 's'}\`;
-    } else {
+    // Headline: honest uncertainty range from per-sample α p10/p90 when
+    // a fit exists, else from wide FALLBACK_ALPHA brackets. When spread
+    // ≥5pp we show the range INSTEAD of the point estimate; tight spread
+    // collapses to point. No measured path — count_tokens probes were
+    // removed because they leak the original text to Anthropic, which
+    // defeats the proxy's whole purpose.
+    {
       const pctPoint = s.saved_pct;
       const pctLo = (typeof s.saved_pct_low === 'number') ? s.saved_pct_low : pctPoint;
       const pctHi = (typeof s.saved_pct_high === 'number') ? s.saved_pct_high : pctPoint;
@@ -1497,7 +1425,6 @@ function shortPath(p) {
 // into a calculator and reproduce the headline byte-identically.
 function renderSavingsMath(s) {
   const pa = s.pricing_assumptions || {};
-  const haveMeasured = typeof s.saved_pct_measured === 'number' && (s.measured_events || 0) > 0;
 
   // ---- tokens-saved card --------------------------------------------------
   // effective_cost = input + cache_create×1.25 + cache_read×0.10 + output×5
@@ -1545,29 +1472,16 @@ function renderSavingsMath(s) {
 
   // ---- reduction (%) card -------------------------------------------------
   const pctRows = [];
-  if (haveMeasured) {
-    pctRows.push(fmtRow('baseline_tokens', s.effective_cost_baseline_measured,
-                        '(count_tokens on pre-transform body, summed)'));
-    pctRows.push(fmtRow('actual_tokens', s.effective_cost_actual_measured,
-                        '(count_tokens on post-transform body, summed)'));
-    pctRows.push(fmtRow('saved_tokens', s.saved_effective_tokens_measured,
-                        '<span class="op">=</span> baseline − actual'));
-    pctRows.push(fmtRow('saved_pct', s.saved_pct_measured + '%',
-                        '<span class="op">=</span> saved / baseline × 100'));
-    pctRows.push(fmtRow('measured_events', s.measured_events,
-                        '(events where count_tokens succeeded on both bodies)'));
-  } else {
-    pctRows.push(fmtRow('baseline_est', s.effective_cost_baseline,
-                        '(α × compressed_chars × cache-mix-rate, summed)'));
-    pctRows.push(fmtRow('actual_paid', s.effective_cost_actual, '(weighted upstream usage, summed)'));
-    pctRows.push(fmtRow('saved', s.saved_effective_tokens,
-                        '<span class="op">=</span> baseline − actual'));
-    pctRows.push(fmtRow('saved_pct', s.saved_pct + '%',
-                        '<span class="op">=</span> saved / baseline × 100'));
-    if (typeof s.saved_pct_low === 'number' && typeof s.saved_pct_high === 'number') {
-      pctRows.push(fmtRow('range', \`\${s.saved_pct_low}% – \${s.saved_pct_high}%\`,
-                          '(low/high bounds from recent traffic\\'s chars-per-token spread)'));
-    }
+  pctRows.push(fmtRow('baseline_est', s.effective_cost_baseline,
+                      '(α × compressed_chars × cache-mix-rate, summed)'));
+  pctRows.push(fmtRow('actual_paid', s.effective_cost_actual, '(weighted upstream usage, summed)'));
+  pctRows.push(fmtRow('saved', s.saved_effective_tokens,
+                      '<span class="op">=</span> baseline − actual'));
+  pctRows.push(fmtRow('saved_pct', s.saved_pct + '%',
+                      '<span class="op">=</span> saved / baseline × 100'));
+  if (typeof s.saved_pct_low === 'number' && typeof s.saved_pct_high === 'number') {
+    pctRows.push(fmtRow('range', \`\${s.saved_pct_low}% – \${s.saved_pct_high}%\`,
+                        '(low/high bounds from recent traffic\\'s chars-per-token spread)'));
   }
   // Image-cost formula reference — applies on the actual side because
   // each image we emit costs ~width×height/750 tokens upstream.
@@ -1580,11 +1494,7 @@ function renderSavingsMath(s) {
     + imgFormula
     + '<div style="height:6px"></div>'
     + pctRows.join('')
-    + '<span class="src">'
-      + (haveMeasured
-          ? 'measured · count_tokens ground truth, no estimation'
-          : 'estimated · α-regression from cold-miss events')
-      + '</span>';
+    + '<span class="src">estimated · α-regression from cold-miss events</span>';
 }
 
 function fmtRow(key, val, note) {

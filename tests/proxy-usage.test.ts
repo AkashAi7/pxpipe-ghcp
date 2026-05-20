@@ -379,4 +379,43 @@ describe('proxy usage extraction', () => {
     expect(captures[0]!.reqBodySha8).toBeDefined();
     expect(captures[0]!.reqBodySha8).toBe(captures[1]!.reqBodySha8);
   });
+
+  // The proxy MUST NOT make any extra calls to upstream beyond the single
+  // /v1/messages forward. count_tokens was tried as a measurement path
+  // earlier, but it leaks the pre-compression text to Anthropic — which
+  // defeats the whole purpose of pixelpipe. This regression test asserts
+  // we never hit count_tokens (or any other endpoint) for any request.
+  it('does NOT call any side-channel endpoints (no count_tokens, no leaks)', async () => {
+    const sidePaths: string[] = [];
+    const restore = mockUpstream((req) => {
+      const url = new URL(req.url);
+      if (url.pathname !== '/v1/messages') sidePaths.push(url.pathname);
+      return new Response(
+        JSON.stringify({
+          id: 'msg_x',
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'ok' }],
+          model: 'claude-opus-4-5',
+          stop_reason: 'end_turn',
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    });
+
+    const proxy = createProxy({ upstream: 'http://mock', onRequest: () => {} });
+    const res = await proxy(
+      new Request('http://proxy/v1/messages', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: SAMPLE_REQ_BODY,
+      }),
+    );
+    await res.text();
+    await new Promise((r) => setTimeout(r, 20));
+    restore();
+
+    expect(sidePaths).toEqual([]);
+  });
 });

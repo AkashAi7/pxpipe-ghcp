@@ -316,16 +316,6 @@ export interface TransformInfo {
    *  β·imagePixels`. On a cold-miss event the upstream `cache_create_tokens`
    *  is the full LHS, so a regression over N cold-misses pins both. */
   outgoingTextChars?: number;
-  /** Ground-truth tokenizer count for the ORIGINAL (pre-transform) request
-   *  body, obtained by calling Anthropic's /v1/messages/count_tokens with
-   *  the unmodified body. The dashboard reports the real saved_pct from
-   *  this paired with actualTokensMeasured. Undefined only when the
-   *  upstream count_tokens call failed for this event. */
-  baselineTokensMeasured?: number;
-  /** Ground-truth tokenizer count for the TRANSFORMED (post-pixelpipe)
-   *  request body. Populated alongside baselineTokensMeasured.
-   *  saved_tokens_measured = baselineTokensMeasured - actualTokensMeasured. */
-  actualTokensMeasured?: number;
   /** Length of the static (cacheable) slab rendered into the image. */
   staticChars: number;
   /** Length of the dynamic (per-turn) slab kept as plain text. */
