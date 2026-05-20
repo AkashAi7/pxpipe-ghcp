@@ -43,11 +43,15 @@ export interface SessionSummary {
   lastSeen: string;
   /** Number of events recorded against this session. */
   requestCount: number;
-  /** Sum of `(orig_chars - image_bytes)` over compressed events — the bytes
-   *  of source text we removed by rendering. Negative values clamp to 0. */
+  /** `tokensSavedEst × 4` — a coarse byte-equivalent of the token savings,
+   *  useful only as a rough "we shaved X kB off the wire" callout. Not
+   *  load-bearing math; the real number is `tokensSavedEst`. */
   charsSaved: number;
-  /** Token estimate at Anthropic's ~3.75 chars/token rate. Surface-level
-   *  proxy — actual savings depend on which tokens the cache hits. */
+  /** Real input-side tokens saved: sum of `baseline_tokens − (input +
+   *  cache_create×1.25 + cache_read×0.10)` across events that carry both
+   *  a /v1/messages/count_tokens probe and an upstream usage block.
+   *  Events missing either side contribute to requestCount but not here.
+   *  No estimation — can go negative when a compression net-lost. */
   tokensSavedEst: number;
   /** Sum of cache_read_input_tokens — actual prompt-cache hits. */
   cacheReadTokens: number;
