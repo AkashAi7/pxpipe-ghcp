@@ -95,6 +95,26 @@ export interface TransformOptions {
    *  full design space — try-then-decide (this), session-state (rejected),
    *  always-collapse (rejected), cache-bust-driven (rejected). */
   historyAmortizationHorizon?: number;
+  /** Tokens that the *un-rewritten* request would have hit Anthropic's cache
+   *  on (cache_read at 0.10×). When pixelpipe rewrites the cacheable prefix
+   *  (slab compression, image substitution, history collapse), the new
+   *  prefix has a different cache key — Anthropic charges cache_create
+   *  (1.25×) on the new prefix's first turn, destroying the prior warm
+   *  cache. The break-even gate accounts for this burn cost as a one-time
+   *  penalty amortized over `historyAmortizationHorizon` turns:
+   *
+   *    burn = priorWarmTokens × (CACHE_CREATE_RATE − CACHE_READ_RATE) / N
+   *
+   *  Set by the host from a recent `count_tokens` cacheable-prefix probe
+   *  on the un-rewritten body, or from a session-keyed LRU populated by
+   *  prior responses. Default 0 (no burn — current behavior, correct for
+   *  the first turn of a fresh conversation). Hosts that already populate
+   *  `historyAmortizationHorizon` should populate this too; mismatched
+   *  values bias the gate toward over-compression on short conversations.
+   *
+   *  Cold-start safe: 0 disables the burn term entirely. Negative or
+   *  non-finite values are clamped to 0. */
+  priorWarmTokens?: number;
 }
 
 const DEFAULTS: Required<TransformOptions> = {
@@ -130,6 +150,7 @@ const DEFAULTS: Required<TransformOptions> = {
   // multi-turn amortization (e.g. ocproxy's Codex integration) pass an
   // integer ≥ 2 via `historyAmortizationHorizon`. See option jsdoc.
   historyAmortizationHorizon: 1,
+  priorWarmTokens: 0,
   // R2 multi-column ON (2 cols) — at single-col the break-even gate
   // correctly rejects compression on real tool-doc-shaped slabs (~38 chars/
   // row → ~29 imgs vs 39k text tokens → net loss). Two columns packs ~2×
@@ -349,6 +370,12 @@ export function isCompressionProfitable(
    *  Default 4 (Anthropic's English-text average). Lower values = more
    *  profitable text compressions (each char buys more tokens back). */
   charsPerToken: number = CHARS_PER_TOKEN,
+  /** Tokens the un-rewritten path would have hit cache on. Adds a one-time
+   *  burn penalty of `priorWarmTokens × (CACHE_CREATE_RATE − CACHE_READ_RATE)`
+   *  to the image side — the cost of forcing a fresh cache_create when the
+   *  rewritten prefix invalidates Anthropic's prior cache key. Default 0
+   *  (cold-start behavior; matches pre-burn-aware callers byte-for-byte). */
+  priorWarmTokens: number = 0,
 ): boolean {
   const n = Math.max(1, numCols | 0);
   let estImages: number;
@@ -378,7 +405,16 @@ export function isCompressionProfitable(
     : CHARS_PER_TOKEN;
   const imageTokensCost = estImages * effectiveTokensPerImage(n);
   const textTokensEquivalent = textLen / cpt;
-  return imageTokensCost < textTokensEquivalent;
+  // Cache-burn penalty: rewriting the cacheable prefix invalidates
+  // Anthropic's prior cache key. The un-rewritten path would have paid
+  // CACHE_READ_RATE on `priorWarmTokens`; the rewritten path pays
+  // CACHE_CREATE_RATE on the new prefix. The delta is borne entirely on
+  // this turn (subsequent turns warm the new prefix). Per-turn gate uses
+  // the full delta with no amortization; that's what `horizon=1` means.
+  const safeBurn = Number.isFinite(priorWarmTokens) && priorWarmTokens > 0
+    ? priorWarmTokens * (CACHE_CREATE_RATE - CACHE_READ_RATE)
+    : 0;
+  return imageTokensCost + safeBurn < textTokensEquivalent;
 }
 
 /**
@@ -425,9 +461,13 @@ export function isCompressionProfitableAmortized(
   numCols: number,
   charsPerToken: number,
   horizon: number,
+  /** Burn penalty source — see same-named param on `isCompressionProfitable`.
+   *  Amortized across `horizon` turns at this gate (the prior cache is
+   *  burned exactly once, on the first rewritten turn). Default 0. */
+  priorWarmTokens: number = 0,
 ): boolean {
   if (!Number.isFinite(horizon) || horizon <= 1) {
-    return isCompressionProfitable(textOrLen, cols, imageCountCap, numCols, charsPerToken);
+    return isCompressionProfitable(textOrLen, cols, imageCountCap, numCols, charsPerToken, priorWarmTokens);
   }
   const N = Math.max(2, Math.floor(horizon));
   const n = Math.max(1, numCols | 0);
@@ -455,7 +495,12 @@ export function isCompressionProfitableAmortized(
   // assumptions.
   const imageLifetime = imageTokens * (CACHE_CREATE_RATE + CACHE_READ_RATE * (N - 1));
   const textLifetime = textTokens * CACHE_READ_RATE * N;
-  return imageLifetime < textLifetime;
+  // Burn is paid exactly once (on the rewritten-prefix's first turn),
+  // amortized across N turns. Adds to the image side.
+  const safeBurn = Number.isFinite(priorWarmTokens) && priorWarmTokens > 0
+    ? priorWarmTokens * (CACHE_CREATE_RATE - CACHE_READ_RATE)
+    : 0;
+  return imageLifetime + safeBurn < textLifetime;
 }
 
 
@@ -1429,7 +1474,7 @@ async function runHistoryCollapseAndFinalize(
       : HISTORY_CHARS_PER_TOKEN;
     const horizon = Math.max(1, Math.floor(o.historyAmortizationHorizon));
     const historyProfitable = (text: string, cols: number): boolean =>
-      isCompressionProfitableAmortized(text, cols, undefined, 1, historyCpt, horizon);
+      isCompressionProfitableAmortized(text, cols, undefined, 1, historyCpt, horizon, 0);
     const { messages: newMessages, info: histInfo } = await collapseHistory(
       req.messages,
       historyProfitable,
@@ -1651,7 +1696,7 @@ export async function transformRequest(
   const slabCpt = opts.charsPerToken !== undefined
     ? o.charsPerToken
     : SLAB_CHARS_PER_TOKEN;
-  if (!isCompressionProfitable(combined, o.cols, undefined, numCols, slabCpt)) {
+  if (!isCompressionProfitable(combined, o.cols, undefined, numCols, slabCpt, o.priorWarmTokens)) {
     info.reason = `not_profitable (slab=${combined.length} chars)`;
     bumpPassthrough(info, 'not_profitable');
     // Slab failed the break-even gate, but message history may still be
@@ -1775,7 +1820,7 @@ export async function transformRequest(
           // model reads.
           const reminderRaw = (blk as TextBlock).text;
           const reminderText = compactSlabWhitespace(reminderRaw);
-          if (!isCompressionProfitable(reminderText, o.cols, undefined, numCols, o.charsPerToken)) {
+          if (!isCompressionProfitable(reminderText, o.cols, undefined, numCols, o.charsPerToken, 0)) {
             // Above threshold but image cost ≥ text cost. Net loss to compress.
             bumpPassthrough(info, 'not_profitable');
             processedExisting.push(blk);
@@ -1981,7 +2026,7 @@ export async function transformRequest(
       : HISTORY_CHARS_PER_TOKEN;
     const horizon = Math.max(1, Math.floor(o.historyAmortizationHorizon));
     const historyProfitable = (text: string, cols: number): boolean =>
-      isCompressionProfitableAmortized(text, cols, undefined, 1, historyCpt, horizon);
+      isCompressionProfitableAmortized(text, cols, undefined, 1, historyCpt, horizon, 0);
     const { messages: newMessages, info: histInfo } = await collapseHistory(
       req.messages,
       historyProfitable,

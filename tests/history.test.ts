@@ -629,4 +629,46 @@ describe('isCompressionProfitableAmortized — multi-turn horizon gate', () => {
     // amortized-accept. amortized-accept ⇒ per-turn-accept.
     if (a) expect(c).toBe(true);
   });
+
+  it('priorWarmTokens flips a per-turn-accepting compression to reject when burn exceeds savings', async () => {
+    const { isCompressionProfitable: cold } =
+      await import('../src/core/transform.js');
+    // Text that comfortably wins cold: 80k chars at cpt=2.0 → 40k text
+    // tokens vs ~6 images × 2500 = 15k image tokens. Cold accepts.
+    const text = 'a'.repeat(80_000);
+    expect(cold(text, 100, undefined, 1, 2.0, 0)).toBe(true);
+    // Now add 30k prior warm tokens. Burn = 30000 × (1.25 - 0.10) = 34,500.
+    // Image total cost = 15k + 34.5k = 49.5k > 40k text → reject.
+    expect(cold(text, 100, undefined, 1, 2.0, 30_000)).toBe(false);
+    // At 10k warm tokens burn=11.5k, image total=26.5k<40k → still accept.
+    expect(cold(text, 100, undefined, 1, 2.0, 10_000)).toBe(true);
+  });
+
+  it('priorWarmTokens amortizes across horizon — burn that rejects per-turn accepts at long horizon', async () => {
+    const { isCompressionProfitable: cold, isCompressionProfitableAmortized: amort } =
+      await import('../src/core/transform.js');
+    // text=80k, cpt=2.0 → textTokens=40k. Single-col 100-cols, ~800 rows,
+    // ~6 images at 2500 tok each = 15k image tokens.
+    const text = 'a'.repeat(80_000);
+    // Per-turn cold accepts without burn.
+    expect(cold(text, 100, undefined, 1, 2.0, 0)).toBe(true);
+    // Burn=25k → burn cost = 25000 × 1.15 = 28,750.
+    // Per-turn: 15k + 28.75k = 43.75k > 40k text → REJECT.
+    expect(cold(text, 100, undefined, 1, 2.0, 25_000)).toBe(false);
+    // N=20: textLifetime = 40k × 0.1 × 20 = 80k.
+    //       imageLifetime = 15k × (1.25 + 0.1×19) = 47.25k.
+    //       Total image side = 47.25k + 28.75k = 76k < 80k → ACCEPT.
+    expect(amort(text, 100, undefined, 1, 2.0, 20, 25_000)).toBe(true);
+  });
+
+  it('priorWarmTokens=0 is byte-identical to omitting the parameter (cold-start safe)', async () => {
+    const { isCompressionProfitable: cold, isCompressionProfitableAmortized: amort } =
+      await import('../src/core/transform.js');
+    const text = 'a'.repeat(20_000);
+    expect(cold(text, 100, undefined, 1, 1.5, 0)).toBe(cold(text, 100, undefined, 1, 1.5));
+    expect(amort(text, 100, undefined, 1, 1.5, 5, 0)).toBe(amort(text, 100, undefined, 1, 1.5, 5));
+    // Negative / NaN burn clamps to 0 (defensive).
+    expect(cold(text, 100, undefined, 1, 1.5, -100)).toBe(cold(text, 100, undefined, 1, 1.5, 0));
+    expect(cold(text, 100, undefined, 1, 1.5, NaN)).toBe(cold(text, 100, undefined, 1, 1.5, 0));
+  });
 });
