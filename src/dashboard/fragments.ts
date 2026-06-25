@@ -668,13 +668,32 @@ const CSS = `
     --border: #efe5db; --border-strong: #e4d6c8;
     --ink: #241f1b; --ink-2: #5d534a; --muted: #9b9189;
     --flame: #ff5a1f; --flame-strong: #e8420a; --flame-ink: #bd3a08; --flame-tint: #fff1ea;
-    --good: #1f9d57; --good-tint: #e7f6ee; --bad: #d8483b; --bad-tint: #fcebe9; --warn: #b7791f;
+    --good: #1f9d57; --good-tint: #e7f6ee; --bad: #d8483b; --bad-tint: #fcebe9; --warn: #b7791f; --warn-tint: #fbf0db;
     --img: #ff5a1f; --img-ink: #bd3a08; --img-tint: #fff1ea;
     --txt: #2f7db0; --txt-ink: #1f5f8b; --txt-tint: #e9f3fb;
     --radius: 14px;
     --shadow: 0 1px 2px rgba(60,35,15,.05), 0 8px 24px rgba(60,35,15,.05);
     --mono: 'SF Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color-scheme: light;
   }
+  /* Dark theme: same warm-flame identity, inverted neutrals. Set before first
+     paint by the <head> script (localStorage 'pp-theme' else system pref);
+     toggled by ppTheme(). Accents (flame/img/txt) are lifted for contrast. */
+  :root[data-theme="dark"] {
+    --bg: #17120f; --surface: #211a15; --surface-2: #2a211b;
+    --border: #352a22; --border-strong: #46382e;
+    --ink: #f6efe8; --ink-2: #cabbac; --muted: #9a8c7d;
+    --flame: #ff6a33; --flame-strong: #e8420a; --flame-ink: #ff9a63; --flame-tint: #3a2318;
+    --good: #3fbd76; --good-tint: #15291f; --bad: #f0645a; --bad-tint: #341b18; --warn: #d99a3a; --warn-tint: #33260f;
+    --img: #ff6a33; --img-ink: #ff9a63; --img-tint: #3a2318;
+    --txt: #5aa3d6; --txt-ink: #8cc3ea; --txt-tint: #142631;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 28px rgba(0,0,0,.45);
+    color-scheme: dark;
+  }
+  /* Dark fix-ups for the few intentionally hard-coded (light) spots. */
+  :root[data-theme="dark"] .banner { border-color: #6e342c; color: #f4b9b1; }
+  :root[data-theme="dark"] .banner strong { color: #ffd6cf; }
+  :root[data-theme="dark"] .toast { box-shadow: 0 8px 24px rgba(0,0,0,.5); }
   * { box-sizing: border-box; }
   body { margin: 0; padding: 22px 26px 64px; background: var(--bg); color: var(--ink-2);
     font: 14px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
@@ -709,6 +728,10 @@ const CSS = `
     box-shadow: var(--shadow); }
   .switch-btn:hover { border-color: var(--flame); color: var(--flame-ink); }
   .hint { color: var(--muted); font-size: 11px; }
+  .theme-btn { background: var(--surface); color: var(--ink-2); border: 1px solid var(--border-strong);
+    padding: 5px 11px; cursor: pointer; border-radius: 8px; font: inherit; font-size: 12px; font-weight: 600;
+    box-shadow: var(--shadow); display: inline-flex; align-items: center; gap: 6px; line-height: 1; }
+  .theme-btn:hover { border-color: var(--flame); color: var(--flame-ink); }
 
   /* model chips */
   .models { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 18px; }
@@ -721,7 +744,7 @@ const CSS = `
 
   /* session hero */
   #frag-session { display: block; margin-bottom: 16px; }
-  .hero { background: linear-gradient(135deg, #fff8f4, var(--surface) 60%); border: 1px solid var(--border);
+  .hero { background: linear-gradient(135deg, var(--flame-tint), var(--surface) 60%); border: 1px solid var(--border);
     border-left: 4px solid var(--flame); border-radius: var(--radius); padding: 20px 24px; box-shadow: var(--shadow); }
   .hero-neg { border-left-color: var(--bad); }
   .hero-eyebrow { font-size: 11.5px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
@@ -858,7 +881,7 @@ const CSS = `
   .pill { display: inline-block; min-width: 38px; text-align: center; font-size: 11px; font-weight: 700;
     padding: 2px 8px; border-radius: 999px; font-variant-numeric: tabular-nums; }
   .pill-good { background: var(--good-tint); color: var(--good); }
-  .pill-warn { background: #fbf0db; color: var(--warn); }
+  .pill-warn { background: var(--warn-tint); color: var(--warn); }
   .pill-bad { background: var(--bad-tint); color: var(--bad); }
   .badge { font-size: 10.5px; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
   .badge-img { background: var(--img-tint); color: var(--img-ink); }
@@ -948,6 +971,26 @@ const GLUE_JS = `
   });
 `;
 
+// Theme: light/dark via data-theme on <html>; saved in localStorage, defaults to system pref.
+const THEME_JS = `
+  (function () {
+    function apply(t) {
+      document.documentElement.dataset.theme = t;
+      var b = document.getElementById('theme-btn');
+      if (b) {
+        b.textContent = t === 'dark' ? '☀ Light' : '☾ Dark';
+        b.setAttribute('aria-label', t === 'dark' ? 'Switch to light mode' : 'Switch to dark mode');
+      }
+    }
+    window.ppTheme = function () {
+      var next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+      try { localStorage.setItem('pp-theme', next); } catch (e) {}
+      apply(next);
+    };
+    apply(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
+  })();
+`;
+
 export function renderPage(port: number): string {
   // hx-trigger="load, every Ns": paint on load then poll (2s live, 5s aggregates).
   return `<!doctype html>
@@ -958,6 +1001,16 @@ export function renderPage(port: number): string {
 <title>pxpipe — live dashboard</title>
 <link rel="icon" href="${FAVICON}" />
 <style>${CSS}</style>
+<script>
+  // Set theme before first paint (no flash): saved choice wins, else system preference.
+  (function () {
+    try {
+      var s = localStorage.getItem('pp-theme');
+      var dark = s ? s === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+      document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+    } catch (e) { document.documentElement.dataset.theme = 'light'; }
+  })();
+</script>
 </head>
 <body>
 
@@ -970,6 +1023,7 @@ export function renderPage(port: number): string {
     </div>
   </div>
   <div class="controls">
+    <button type="button" id="theme-btn" class="theme-btn" onclick="ppTheme()" aria-label="Toggle dark mode" title="Toggle dark / light mode">☾ Dark</button>
     <div id="frag-toggle" hx-get="/fragments/toggle" hx-trigger="load, every 2s" hx-swap="innerHTML"></div>
   </div>
 </header>
@@ -1022,6 +1076,7 @@ export function renderPage(port: number): string {
 
 <script>${HTMX_JS}</script>
 <script>${GLUE_JS}</script>
+<script>${THEME_JS}</script>
 <script>${ALPINE_JS}</script>
 </body>
 </html>`;
