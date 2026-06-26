@@ -76,6 +76,12 @@ export interface TrackEvent {
   /** sha8 of the collapsed history image. Unchanged across turns proves the prompt cache is hitting (cache_read).
    *  A drifting hash means the collapse boundary is unstable. Absent on no-collapse turns. */
   history_image_sha8?: string;
+  /** sha8 of the exact cacheable prefix sent (tools+system+imaged prefix, live
+   *  tail excluded). Changes turn-over-turn within a session ⇒ pxpipe-side cache
+   *  bust; stable while cache_create spikes ⇒ upstream eviction. See #11. */
+  cache_prefix_sha8?: string;
+  /** Approx chars in that pinned prefix (growth vs pure-invalidation split). */
+  cache_prefix_bytes?: number;
 
   // From TransformInfo.env:
   cwd?: string;
@@ -235,6 +241,8 @@ export function toTrackEvent(ev: ProxyEvent): TrackEvent {
     if (info.historyImageSha) {
       out.history_image_sha8 = info.historyImageSha;
     }
+    if (info.cachePrefixSha8) out.cache_prefix_sha8 = info.cachePrefixSha8;
+    if (info.cachePrefixBytes !== undefined) out.cache_prefix_bytes = info.cachePrefixBytes;
     if (info.unknownStaticTags && info.unknownStaticTags.length > 0)
       out.unknown_static_tags = info.unknownStaticTags;
     if (info.systemSha8) out.system_sha8 = info.systemSha8;

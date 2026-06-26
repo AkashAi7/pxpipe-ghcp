@@ -563,6 +563,16 @@ export interface TransformInfo {
    *  proves Anthropic's prompt cache can `cache_read` (0.1×) instead of `cache_create`.
    *  A changing hash means cache-key drift is back. Only set when collapse produced images. */
   historyImageSha?: string;
+  /** sha8 of the ACTUAL cacheable prefix sent this turn (tools + system +
+   *  message blocks through the imaged history/slab boundary; the live tail is
+   *  excluded). Read-only measurement. A change turn-over-turn within a session
+   *  ⇒ pxpipe serialized different prefix bytes (we busted our own cache,
+   *  pxpipe-side); STABLE while cache_create spikes / cache_read collapses ⇒ the
+   *  prefix was evicted upstream. Decisive attribution signal (see #11). */
+  cachePrefixSha8?: string;
+  /** Approx size (chars) of that cached prefix — pairs with cachePrefixSha8 so a
+   *  bust reads as growth (size up) vs pure invalidation (size unchanged). */
+  cachePrefixBytes?: number;
   /** Why the history collapse didn't run (or did). Diagnostic only. */
   historyReason?:
     | 'no_history'
@@ -777,6 +787,52 @@ function relocateAnchorToHistoryImage(messages: Message[] | undefined): void {
 
   historyImg.cache_control = slabAnchor.cache_control;
   delete slabAnchor.cache_control;
+}
+
+/**
+ * Read-only digest of the cacheable prefix pxpipe actually sends: tools +
+ * system + message blocks up to and including the imaged history image (or, on
+ * no-collapse turns, the slab boundary). The naturally-growing live tail is
+ * excluded, so the digest only moves when something *inside the pinned prefix*
+ * moves. Pairs with per-turn cache_read/cache_create to attribute a prompt-cache
+ * bust: a digest that CHANGES between consecutive turns of one session means we
+ * serialized different prefix bytes (pxpipe-side — a per-turn block crossing the
+ * breakpoint, or marker drift); a STABLE digest on a turn that still re-created
+ * the prefix points upstream (eviction). Never mutates the request, so it cannot
+ * perturb the cache behavior it measures.
+ */
+async function cachePrefixDigest(
+  req: { tools?: unknown; system?: unknown; messages?: unknown },
+): Promise<{ sha8: string; bytes: number } | undefined> {
+  const msgs = Array.isArray(req.messages) ? (req.messages as Message[]) : [];
+  // Boundary = latest message carrying pxpipe's imaged prefix: the history image
+  // (banner) when collapse ran, else the slab message ('[End of rendered
+  // context.]'). Identified exactly as relocateAnchorToHistoryImage does.
+  let boundary = -1;
+  for (let i = 0; i < msgs.length; i++) {
+    const content = msgs[i]?.content;
+    if (!Array.isArray(content)) continue;
+    const first = content[0] as TextBlock | undefined;
+    const isHistory = first?.type === 'text' && first.text === HISTORY_SYNTHETIC_INTRO;
+    const hasSlab = content.some(
+      (b) => b && (b as TextBlock).type === 'text' && (b as TextBlock).text === '[End of rendered context.]',
+    );
+    if (isHistory || hasSlab) boundary = i;
+  }
+  if (boundary < 0) return undefined; // not an imaged-prefix shape — nothing pinned
+  const parts: string[] = [];
+  if (Array.isArray(req.tools)) for (const t of req.tools) parts.push(JSON.stringify(t));
+  const sys = req.system;
+  if (typeof sys === 'string') parts.push(sys);
+  else if (Array.isArray(sys)) for (const b of sys) parts.push(JSON.stringify(b));
+  for (let i = 0; i <= boundary; i++) {
+    const content = msgs[i]?.content;
+    if (typeof content === 'string') parts.push(content);
+    else if (Array.isArray(content))
+      for (const b of content) parts.push(typeof b === 'string' ? b : JSON.stringify(b));
+  }
+  const prefix = parts.join(' ');
+  return { sha8: await sha8(prefix), bytes: prefix.length };
 }
 
 /** Best-effort extraction of the CLAUDE.md slab from a system text (heuristic).
@@ -1840,6 +1896,16 @@ export async function transformRequest(
   }
 
   info.compressed = true;
+  // Attribution signal for prompt-cache busts (#11): digest the exact pinned
+  // prefix we send (history/slab boundary; live tail excluded) AFTER all marker
+  // placement — incl. relocateAnchorToHistoryImage — is final. Read-only.
+  {
+    const pfx = await cachePrefixDigest(req);
+    if (pfx) {
+      info.cachePrefixSha8 = pfx.sha8;
+      info.cachePrefixBytes = pfx.bytes;
+    }
+  }
   // Top dropped codepoints, capped at 20 entries to bound JSONL row size.
   if (droppedCodepoints.size > 0) {
     const TOP_N = 20;
