@@ -4,6 +4,19 @@ All notable changes to pxpipe are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: minor = features /
 behavioral changes, patch = fixes).
 
+## 0.7.1 — 2026-07-03
+
+### Fixed
+- **Relocated env block is now wrapped in `<system-reminder>` tags.** The
+  volatile `# Environment` text that pxpipe moves out of the cached system
+  prefix used to be appended to the last user message as bare prose — on an
+  empty or short user turn it could read as the user's entire message, and
+  models would mis-attribute it ("your message consisted of environment
+  metadata"). The block now carries an explicit provenance header
+  ("Context relocated by pxpipe from the system prompt … not written by the
+  user"), fixing attribution. No cache impact: the wrapper rides the volatile
+  tail behind all cache breakpoints (~60 chars/request).
+
 ## 0.7.0 — 2026-07-03
 
 ### Added
