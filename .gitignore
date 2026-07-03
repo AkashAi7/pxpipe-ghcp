@@ -45,3 +45,6 @@ eval/gist-recall/work*/*.png
 # Eval corpus = real captured transcripts (PII: file paths, project names, and
 # message content). Keep a local copy for eval scripts, but never commit it.
 eval/corpus/
+
+# Bench artifacts (events.jsonl, PNG dumps, workspaces) — one dir per run
+bench/runs/
