@@ -51,7 +51,7 @@ on the dashboard "compress models" chips.
 | LEFT — plain (`a.sh`) | **may be wrong** at this size (drowns in filler) |
 
 **pxpipe correct + plain wrong = the effective-context win.** Each proxy also serves
-a live dashboard ([:47824](http://localhost:47824/) pxpipe, [:47823](http://localhost:47823/)
+a live dashboard ([:47824](http://127.0.0.1:47824/) pxpipe, [:47823](http://127.0.0.1:47823/)
 plain) showing the context/token reduction — the same number `/context` reports.
 
 ---

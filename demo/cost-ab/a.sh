@@ -30,5 +30,5 @@ esac
 
 echo "LEFT = normal (passthrough :47823), model=$MODEL. Launching interactive Claude with the task..."
 # Run in $DIR via a subshell so your terminal stays in the original dir afterward.
-( cd "$DIR" && exec env ANTHROPIC_BASE_URL=http://localhost:47823 \
+( cd "$DIR" && exec env ANTHROPIC_BASE_URL=http://127.0.0.1:47823 \
   "$CB" "$PROMPT" --model "$MODEL" --setting-sources project --strict-mcp-config --no-chrome --dangerously-skip-permissions )

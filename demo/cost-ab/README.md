@@ -46,8 +46,8 @@ Each proxy serves a **live dashboard** in your browser — no commands, no extra
 
 | open in browser | shows |
 |---|---|
-| **http://localhost:47824/** (pxpipe → `b.sh`) | **`THIS SESSION — N% fewer tokens (… total)`** |
-| http://localhost:47823/ (plain → `a.sh`) | ~0% — the passthrough **control** |
+| **http://127.0.0.1:47824/** (pxpipe → `b.sh`) | **`THIS SESSION — N% fewer tokens (… total)`** |
+| http://127.0.0.1:47823/ (plain → `a.sh`) | ~0% — the passthrough **control** |
 
 It updates as the run goes. The headline is the **honest, rate-free number**: real
 server tokens (`input+cache_create+cache_read+output`) vs the same body as text

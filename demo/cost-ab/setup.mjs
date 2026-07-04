@@ -43,8 +43,8 @@ const PROMPT =
 
 // Both arms run through a proxy so BOTH are logged. LEFT = passthrough (normal),
 // RIGHT = pxpipe. See demo/cost-ab/README.md for the 4-terminal layout that starts them.
-const ON_PROXY = process.env.DEMO_ON_PROXY ?? 'http://localhost:47824';   // pxpipe
-const OFF_PROXY = process.env.DEMO_OFF_PROXY ?? 'http://localhost:47823';  // passthrough
+const ON_PROXY = process.env.DEMO_ON_PROXY ?? 'http://127.0.0.1:47824';   // pxpipe
+const OFF_PROXY = process.env.DEMO_OFF_PROXY ?? 'http://127.0.0.1:47823';  // passthrough
 
 // --setting-sources project -> use ONLY the seeded project settings (model [1m],
 //   no MCP); ignore the user global ~/.claude/settings.json.
