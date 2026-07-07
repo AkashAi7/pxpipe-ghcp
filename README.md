@@ -5,9 +5,16 @@
 This repository is adapted for GHCP at:
 https://github.com/AkashAi7/pxpipe-ghcp
 
-Changes in this variant:
-- repository metadata now points to the GHCP fork
-- local validation run includes `pnpm run typecheck`, `pnpm test`, and `pnpm run build`
+## Start in 2 minutes
+
+If you only want to use it (not develop it), run exactly this:
+
+```bash
+npx pxpipe-proxy
+ANTHROPIC_BASE_URL=http://127.0.0.1:47821 claude
+```
+
+That is the simplest path and matches the original project UX.
 
 **Cut Claude Code's input tokens by rendering bulky context as images — the same system prompt, tool docs, and history, in a fraction of the tokens.**
 
@@ -60,32 +67,19 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:47821 claude  # point Claude Code at it
 
 ## GitHub distribution quickstart
 
-Fastest path (same UX as the original):
-
-```bash
-npx pxpipe-proxy
-ANTHROPIC_BASE_URL=http://127.0.0.1:47821 claude
-```
-
-Use this if you want to distribute and test the GHCP fork directly from GitHub.
+If you want to run this fork from source and verify it before sharing:
 
 ```bash
 git clone https://github.com/AkashAi7/pxpipe-ghcp.git
 cd pxpipe-ghcp
-
-# Install dependencies
 npx --yes pnpm@10.21.0 install
-
-# Validate
 npx --yes pnpm@10.21.0 run typecheck
 npx --yes pnpm@10.21.0 test
 npx --yes pnpm@10.21.0 run build
-
-# Run the proxy
 node dist/node.js
 ```
 
-For a quick token-saving demo on this repo content:
+Optional quick savings demo:
 
 ```bash
 node dist/node.js export . --include "src/**/*.ts" --out .tmp-demo --json
