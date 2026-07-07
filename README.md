@@ -1,5 +1,14 @@
 # pxpipe
 
+## GHCP adaptation
+
+This repository is adapted for GHCP at:
+https://github.com/AkashAi7/pxpipe-ghcp
+
+Changes in this variant:
+- repository metadata now points to the GHCP fork
+- local validation run includes `pnpm run typecheck`, `pnpm test`, and `pnpm run build`
+
 **Cut Claude Code's input tokens by rendering bulky context as images — the same system prompt, tool docs, and history, in a fraction of the tokens.**
 
 An image's token cost is fixed by its pixel dimensions, not by how much text

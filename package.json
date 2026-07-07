@@ -1,7 +1,7 @@
 {
   "name": "pxpipe-proxy",
   "version": "0.8.0",
-  "description": "Token-saving proxy for Claude Code: renders bulky context (system prompt, tool docs, old history) as dense PNGs to cut input tokens. Runs on Node and Cloudflare Workers.",
+  "description": "GHCP-adapted fork of pxpipe: token-saving proxy for Claude Code with repository metadata and validation for GHCP workflows.",
   "type": "module",
   "bin": {
     "pxpipe": "bin/cli.js"
@@ -97,10 +97,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/teamchong/pxpipe.git"
+    "url": "git+https://github.com/AkashAi7/pxpipe-ghcp.git"
   },
-  "homepage": "https://github.com/teamchong/pxpipe#readme",
+  "homepage": "https://github.com/AkashAi7/pxpipe-ghcp#readme",
   "bugs": {
-    "url": "https://github.com/teamchong/pxpipe/issues"
+    "url": "https://github.com/AkashAi7/pxpipe-ghcp/issues"
   }
 }

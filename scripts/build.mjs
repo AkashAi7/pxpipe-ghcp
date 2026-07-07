@@ -6,18 +6,21 @@ import { build } from 'esbuild';
 import { mkdir, rm, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 
 // Single source of truth for the CLI version: read it here, inline it into the
 // bundle via esbuild `define`. Reading npm_package_version at CLI *runtime* is
 // unreliable (unset for global bins / npx, or the consumer's version), so the
 // value is fixed at build time instead.
 const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+const require = createRequire(import.meta.url);
 
 const OUT = 'dist';
 if (existsSync(OUT)) await rm(OUT, { recursive: true, force: true });
 await mkdir(OUT, { recursive: true });
 
-const tsc = spawnSync('pnpm', ['exec', 'tsc', '-p', 'tsconfig.json'], {
+const tscBin = require.resolve('typescript/bin/tsc');
+const tsc = spawnSync(process.execPath, [tscBin, '-p', 'tsconfig.json'], {
   stdio: 'inherit',
   shell: false,
 });
