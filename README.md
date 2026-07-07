@@ -60,6 +60,13 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:47821 claude  # point Claude Code at it
 
 ## GitHub distribution quickstart
 
+Fastest path (same UX as the original):
+
+```bash
+npx pxpipe-proxy
+ANTHROPIC_BASE_URL=http://127.0.0.1:47821 claude
+```
+
 Use this if you want to distribute and test the GHCP fork directly from GitHub.
 
 ```bash
