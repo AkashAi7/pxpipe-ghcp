@@ -58,6 +58,32 @@ npx pxpipe-proxy                                  # proxy on 127.0.0.1:47821
 ANTHROPIC_BASE_URL=http://127.0.0.1:47821 claude  # point Claude Code at it
 ```
 
+## GitHub distribution quickstart
+
+Use this if you want to distribute and test the GHCP fork directly from GitHub.
+
+```bash
+git clone https://github.com/AkashAi7/pxpipe-ghcp.git
+cd pxpipe-ghcp
+
+# Install dependencies
+npx --yes pnpm@10.21.0 install
+
+# Validate
+npx --yes pnpm@10.21.0 run typecheck
+npx --yes pnpm@10.21.0 test
+npx --yes pnpm@10.21.0 run build
+
+# Run the proxy
+node dist/node.js
+```
+
+For a quick token-saving demo on this repo content:
+
+```bash
+node dist/node.js export . --include "src/**/*.ts" --out .tmp-demo --json
+```
+
 Dashboard at <http://127.0.0.1:47821/>: tokens saved, every text→image
 conversion side by side, kill switch, live model chips. Responses stream
 normally — pxpipe compresses the *request* only, never the model's output.
